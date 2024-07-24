@@ -1,0 +1,10 @@
+setx BITRATE 32
+
+python -m amodem send --calibrate
+
+python -m amodem recv --calibrate
+
+
+python -m amodem recv -vv -o data
+
+python -m amodem send -vv -i data
