@@ -1,5 +1,6 @@
 import itertools
 import json
+import logging
 import os
 import queue
 import tempfile
@@ -16,10 +17,13 @@ from amodem.__main__ import _config_log
 from amodem.async_reader import AsyncReader
 from amodem.config import bitrates, Configuration
 from amodem.detect import Detector
+from amodem.framing import Framer
 from amodem.recv import Receiver
 from amodem.send import Sender
 from amodem.stream import Reader
 from enum import Enum
+
+log = logging.getLogger('__name__')
 
 
 class _tmp:
@@ -47,6 +51,7 @@ class Evt(Enum):
     RECV_FILE_FINISH = "RECV_FILE_FINISH"
     NOTIFY_MSG = "NOTIFY_MSG"
     NOTIFY_FILE = "NOTIFY_FILE"
+    RE_TRANSMIT = "RE_TRANSMIT"
 
 
 def text_to_bytes(text: str):
@@ -108,6 +113,7 @@ class SoundChannelBase:
         self.notify_event_queue = queue.Queue()
         self.recv_event_queue = queue.Queue()
         self.send_event_queue = queue.Queue()
+        self.rx_signal_queue = queue.Queue()
         self.listening = True
         self.r_stream = self.create_recv_stream()
         self.s_stream = self.create_send_stream()
@@ -158,14 +164,14 @@ class SoundChannelBase:
         receiver = Receiver(config=CFG, pylab=pylab)
         dst = dst or tempfile.TemporaryFile()
         try:
-            print('Waiting for carrier tone: %.1f kHz' % (CFG.Fc / 1e3))
+            log.info('Waiting for carrier tone: %.1f kHz' % (CFG.Fc / 1e3))
             signal, amplitude, freq_error = detector.run(signal)
 
             freq = 1 / (1.0 + freq_error)  # receiver's compensated frequency
-            print('Frequency correction: %.3f ppm' % ((freq - 1) * 1e6))
+            log.debug('Frequency correction: %.3f ppm' % ((freq - 1) * 1e6))
 
             gain = 1.0 / amplitude
-            print('Gain correction: %.3f' % gain)
+            log.debug('Gain correction: %.3f' % gain)
 
             sampler = sampling.Sampler(signal,
                                        sampling.defaultInterpolator,
@@ -175,7 +181,7 @@ class SoundChannelBase:
         except BaseException:  # pylint: disable=broad-except
             import traceback
             traceback.print_exc()
-            print('Decoding failed')
+            log.error('Decoding failed')
             return False
         finally:
             dst.flush()
@@ -193,18 +199,19 @@ class SoundChannelBase:
         sender.start()
 
         training_duration = sender.offset
-        print('Sending %.3f seconds of training audio' % (training_duration / CFG.Fs))
-        bits = framing.encode(bytes_data)
-        print('Starting modulation')
-        sender.modulate(bits=bits)
+        log.info('Sending %.3f seconds of training audio' % (training_duration / CFG.Fs))
+        framer = Framer()
+        bits = framing.encode(bytes_data, framer=framer)
+        log.info('Starting modulation')
+        sender.modulate(bits=bits, event_queue=self.rx_signal_queue, framer=framer)
 
         data_duration = sender.offset - training_duration
-        print('Sent %.3f kB @ %.3f seconds' % (len(bytes_data) / 1e3, data_duration / CFG.Fs))
+        log.info('Sent %.3f kB @ %.3f seconds' % (len(bytes_data) / 1e3, data_duration / CFG.Fs))
 
         # post-padding audio with silence
         sender.write(np.zeros(int(CFG.Fs * CFG.silence_stop)))
         t1 = time.time()
-        print("Used time %.4f seconds" % (t1 - t0))
+        log.info("Total Used time %.4f seconds" % (t1 - t0))
 
         self.send_event_queue.put(Event(Evt.SEND_FINISH, ""))
         return
