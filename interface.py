@@ -10,6 +10,8 @@ from tkinter import ttk, messagebox
 
 from sound_channel import SoundChannelBase, Event, Evt
 
+
+VERSION = "0.1.0"
 channel_base = SoundChannelBase()
 
 
@@ -191,7 +193,7 @@ class FileBlock(tk.Frame):
 class ChatInterface(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Chat Interface")
+        self.title(f"Sound Channel v{VERSION}")
         self.geometry("600x400")
         self.selected_file = None
 
