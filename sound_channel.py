@@ -119,11 +119,13 @@ class SoundChannelBase:
         self.s_stream = self.create_send_stream()
         l_start_event = threading.Event()
         s_start_event = threading.Event()
+        self.l_stop_event = threading.Event()
+        self.s_stop_event = threading.Event()
         self.processes = []
         self.p_listen = threading.Thread(target=self.listen_loop,
-                                         args=(l_start_event, self.recv_event_queue,), daemon=True)
+                                         args=(l_start_event, self.l_stop_event, self.recv_event_queue,), daemon=True)
         self.p_send = threading.Thread(target=self.send_loop,
-                                       args=(s_start_event, self.send_event_queue,), daemon=True)
+                                       args=(s_start_event, self.s_stop_event, self.send_event_queue,), daemon=True)
         self.processes.append(self.p_listen)
         self.processes.append(self.p_send)
         self.p_listen.start()
@@ -155,7 +157,7 @@ class SoundChannelBase:
         else:
             self.task_queue.put(WrappedData(MSG_NAME, data))
 
-    def receive_data_signal(self, dst=None):
+    def receive_data_signal(self, dst=None, stop_event: threading.Event = None):
         reader = Reader(self.r_stream, data_type=common.loads)
         signal = itertools.chain.from_iterable(reader)
 
@@ -165,7 +167,7 @@ class SoundChannelBase:
         dst = dst or tempfile.TemporaryFile()
         try:
             log.info('Waiting for carrier tone: %.1f kHz' % (CFG.Fc / 1e3))
-            signal, amplitude, freq_error = detector.run(signal)
+            signal, amplitude, freq_error = detector.run(signal, stop_event=stop_event)
 
             freq = 1 / (1.0 + freq_error)  # receiver's compensated frequency
             log.debug('Frequency correction: %.3f ppm' % ((freq - 1) * 1e6))
@@ -188,7 +190,7 @@ class SoundChannelBase:
             dst.seek(0)
             receiver.report()
 
-    def send_data_bytes(self, bytes_data: bytes):
+    def send_data_bytes(self, bytes_data: bytes, stop_event: threading.Event):
         t0 = time.time()
         send_time = CFG.silence_start + CFG.silence_stop + len(bytes_data) * 8 / (1000 * kb_per_s)
         self.send_event_queue.put(Event(Evt.SPEND_TIME, send_time))
@@ -203,7 +205,7 @@ class SoundChannelBase:
         framer = Framer()
         bits = framing.encode(bytes_data, framer=framer)
         log.info('Starting modulation')
-        sender.modulate(bits=bits)
+        sender.modulate(bits=bits, stop_event=stop_event)
 
         data_duration = sender.offset - training_duration
         log.info('Sent %.3f kB @ %.3f seconds' % (len(bytes_data) / 1e3, data_duration / CFG.Fs))
@@ -216,7 +218,7 @@ class SoundChannelBase:
         self.send_event_queue.put(Event(Evt.SEND_FINISH, ""))
         return
 
-    def send_handshake(self, wrapped_data: WrappedData):
+    def send_handshake(self, wrapped_data: WrappedData, stop_event: threading.Event):
         msg = {
             "name": wrapped_data.get_name(),
             "size": wrapped_data.get_size(),
@@ -224,7 +226,7 @@ class SoundChannelBase:
         if wrapped_data.get_name() == MSG_NAME:
             msg["msg"] = wrapped_data.get_data()
         msg_binary = json.dumps(msg).encode("utf-8")
-        self.send_data_bytes(msg_binary)
+        self.send_data_bytes(msg_binary, stop_event)
 
     def received_handshake(self, file_desc):
         content = file_desc.read()
@@ -237,16 +239,16 @@ class SoundChannelBase:
                 pass
         return False
 
-    def send_loop(self, start_event: threading.Event, event_queue: queue.Queue):
+    def send_loop(self, start_event: threading.Event, stop_event: threading.Event, event_queue: queue.Queue):
         start_event.set()
         while self.listening:
             try:
                 # 使用带超时的 get 操作替代 empty 检查和 sleep
                 wrapped_data = self.task_queue.get(timeout=0.1)
-                self.send_handshake(wrapped_data)
+                self.send_handshake(wrapped_data, stop_event)
                 if wrapped_data.get_name() != MSG_NAME:
                     event_queue.put(Event(Evt.SEND_FILE_START, ""))
-                    self.send_data_bytes(wrapped_data.get_data())
+                    self.send_data_bytes(wrapped_data.get_data(), stop_event)
             except queue.Empty:
                 # 队列为空，继续循环
                 continue
@@ -255,10 +257,10 @@ class SoundChannelBase:
                 import traceback
                 traceback.print_exc()
 
-    def listen_loop(self, start_event: threading.Event, event_queue: queue.Queue):
+    def listen_loop(self, start_event: threading.Event, stop_event: threading.Event, event_queue: queue.Queue):
         start_event.set()
         while self.listening:
-            tmpf = self.receive_data_signal()
+            tmpf = self.receive_data_signal(stop_event=stop_event)
             if not tmpf:
                 continue
             handshake = self.received_handshake(tmpf)
@@ -280,13 +282,15 @@ class SoundChannelBase:
 
                     f_path = os.path.join(folder, file_name)
                     with open(f_path, 'wb+') as temp_file:
-                        self.receive_data_signal(dst=temp_file)
+                        self.receive_data_signal(dst=temp_file, stop_event=stop_event)
 
                     event_queue.put(Event(Evt.RECV_FILE_FINISH, f_path))
         self.r_stream.close()
 
     def stop(self):
         self.listening = False
+        self.l_stop_event.set()
+        self.s_stop_event.set()
 
 
 def test_send_msg():

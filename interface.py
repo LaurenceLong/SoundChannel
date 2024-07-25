@@ -344,5 +344,7 @@ class ChatInterface(tk.Tk):
         super().destroy()
 
 
+icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
 chat_interface = ChatInterface()
+chat_interface.iconbitmap(icon_path)
 chat_interface.mainloop()
