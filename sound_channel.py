@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import queue
+import sys
 import tempfile
 import threading
 import time
@@ -36,11 +37,22 @@ _config_log(_tmp())
 MSG_NAME = "\\msg_str/"
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
-kb_per_s = 16
+kb_per_s = 32
 CFG = bitrates[kb_per_s]
 CFG.silence_start = CFG.silence_stop = 0.15
 CFG.timeout = float("inf")
-CWD = os.path.dirname(os.path.abspath(__file__))
+
+
+def get_application_path():
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的应用程序
+        return os.path.dirname(sys.executable)
+    else:
+        # 如果是在开发环境中运行
+        return os.path.dirname(os.path.abspath(__file__))
+
+
+CWD = get_application_path()
 
 
 class Evt(Enum):

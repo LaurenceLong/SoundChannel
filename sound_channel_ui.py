@@ -338,6 +338,7 @@ class ChatInterface(tk.Tk):
     def destroy(self):
         # 在这里添加其他进程的销毁动作
         channel_base.stop()
+        time.sleep(1)
         for process in channel_base.processes:
             try:
                 process.kill()  # 或 process.kill()，取决于您希望如何结束进程
