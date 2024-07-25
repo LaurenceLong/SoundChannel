@@ -203,7 +203,7 @@ class SoundChannelBase:
         framer = Framer()
         bits = framing.encode(bytes_data, framer=framer)
         log.info('Starting modulation')
-        sender.modulate(bits=bits, event_queue=self.rx_signal_queue, framer=framer)
+        sender.modulate(bits=bits)
 
         data_duration = sender.offset - training_duration
         log.info('Sent %.3f kB @ %.3f seconds' % (len(bytes_data) / 1e3, data_duration / CFG.Fs))
@@ -304,5 +304,6 @@ def test_send_file():
 
 
 if __name__ == "__main__":
-    test_send_msg()
+    # test_send_msg()
     # test_send_file()
+    pass
