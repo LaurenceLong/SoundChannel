@@ -1,1 +1,2 @@
 pyinstaller --onefile --windowed --icon=./icon.ico interface.py
+pyinstaller --clean interface.py

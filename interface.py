@@ -1,3 +1,4 @@
+import base64
 import os
 import queue
 import subprocess
@@ -5,12 +6,14 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import PhotoImage
 from tkinter import filedialog, Menu
 from tkinter import ttk, messagebox
 
+from b64_encoded_files import icon_base64
 from sound_channel import SoundChannelBase, Event, Evt
 
-
+# 版本号
 VERSION = "0.1.0"
 channel_base = SoundChannelBase()
 
@@ -344,7 +347,11 @@ class ChatInterface(tk.Tk):
         super().destroy()
 
 
-icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
+# 设置窗口图标
 chat_interface = ChatInterface()
-chat_interface.iconbitmap(icon_path)
+# 解码base64数据
+icon_data = base64.b64decode(icon_base64)
+# 创建PhotoImage对象
+icon = PhotoImage(data=icon_data)
+chat_interface.tk.call('wm', 'iconphoto', chat_interface._w, icon)
 chat_interface.mainloop()
