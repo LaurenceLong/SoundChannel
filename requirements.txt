@@ -1,4 +1,4 @@
-torch
 numpy~=2.0.0
 pyaudio~=0.2.14
 amodem~=1.15.4
+reedsolo~=2.0.13
