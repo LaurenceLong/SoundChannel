@@ -133,13 +133,13 @@ class SoundChannelBase:
         s_start_event = threading.Event()
         self.l_stop_event = threading.Event()
         self.s_stop_event = threading.Event()
-        self.processes = []
+        self.running_threads = []
         self.p_listen = threading.Thread(target=self.listen_loop,
                                          args=(l_start_event, self.l_stop_event, self.recv_event_queue,), daemon=True)
         self.p_send = threading.Thread(target=self.send_loop,
                                        args=(s_start_event, self.s_stop_event, self.send_event_queue,), daemon=True)
-        self.processes.append(self.p_listen)
-        self.processes.append(self.p_send)
+        self.running_threads.append(self.p_listen)
+        self.running_threads.append(self.p_send)
         self.p_listen.start()
         self.p_send.start()
         l_start_event.wait()

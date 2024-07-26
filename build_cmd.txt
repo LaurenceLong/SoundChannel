@@ -1,2 +1,5 @@
 pyinstaller --onefile --windowed --icon=./icon.ico sound_channel_ui.py
 pyinstaller --clean sound_channel_ui.py
+
+pyinstaller .\sound_channel_ui.spec
+pyinstaller --clean .\sound_channel_ui.spec
