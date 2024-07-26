@@ -2,23 +2,51 @@ import binascii
 import functools
 import itertools
 import logging
+
+import numpy as np
 import reedsolo
 import struct
 
+from commpy.channelcoding import conv_encode, viterbi_decode, Trellis
 from . import common
 
 log = logging.getLogger(__name__)
 
+# 定义2/3 矩阵
+TRELLIS = Trellis(
+    memory=np.array([1, 1]),  # 2个1级移位寄存器
+    g_matrix=np.array([
+        [0o3, 0o2, 0o3],  # 第一个生成多项式
+        [0o2, 0o3, 0o2]  # 第二个生成多项式
+    ])
+)
+
 # 创建RS编码器
-NSYM = 40
+NSYM = 32
 rs = reedsolo.RSCodec(NSYM)  # 10个纠错字节
+
+
+def encode_with_conv(data):
+    length_bits = np.unpackbits(np.frombuffer(np.array([len(data)], dtype=np.int16), dtype=np.uint8))
+    encoded_data = conv_encode(np.concatenate((length_bits, data)), TRELLIS)
+    return encoded_data
+
+
+def decode_with_conv(encoded_data):
+    decoded = viterbi_decode(encoded_data, TRELLIS, tb_depth=20)
+    length_bits = decoded[:16]
+    bytes_little_endian = length_bits.reshape(2, 8)
+    bytes_big_endian = bytes_little_endian[::-1]
+    length = 0
+    for byte in bytes_big_endian:
+        length = (length << 8) | int(''.join(map(str, byte)), 2)
+    return decoded[16:16 + length]
 
 
 def encode_with_rs(data):
     # 确保数据是bytearray类型
     if not isinstance(data, bytearray):
         data = bytearray(data)
-
     # 编码数据
     encoded = rs.encode(data)
     return encoded
@@ -35,6 +63,19 @@ def decode_with_rs(encoded_data):
         return None
 
 
+def encode_pack(data):
+    return encode_with_rs(data)
+
+
+def decode_pack(encoded_data, chunk_size):
+    chunk = bytearray(itertools.islice(encoded_data, chunk_size))
+    if len(chunk) < chunk_size:
+        raise ValueError(f'Incomplete frame, length {len(chunk)} < {chunk_size}(required)')
+
+    decoded = decode_with_rs(chunk)
+    return iter(decoded)
+
+
 def _checksum_func(x):
     return binascii.crc32(bytes(x))
 
@@ -45,10 +86,10 @@ class Checksum:
 
     def encode(self, payload):
         checksum = _checksum_func(payload)
-        return encode_with_rs(struct.pack(self.fmt, checksum) + payload)
+        encoded = struct.pack(self.fmt, checksum) + payload
+        return encoded
 
     def decode(self, data):
-        data = decode_with_rs(data)
         received, = struct.unpack(self.fmt, bytes(data[:self.size]))
         payload = data[self.size:]
         expected = _checksum_func(payload)
@@ -60,28 +101,41 @@ class Checksum:
 
 
 class Framer:
-    block_size = 240 - NSYM
+    chunk_size = 255
+    unencrypted_size = chunk_size - NSYM
+    block_size = unencrypted_size - 1 - 4  # 1 bytes length, 4 bytes crc
     prefix_fmt = '>B'
     prefix_len = struct.calcsize(prefix_fmt)
     checksum = Checksum()
 
     EOF = b''
 
-    def _pack(self, block):
+    def _pack(self, block, padded_size=None):
         frame = self.checksum.encode(block)
-        return bytearray(struct.pack(self.prefix_fmt, len(frame)) + frame)
+        packed = bytearray(struct.pack(self.prefix_fmt, len(frame)) + frame)
+
+        if padded_size is not None:
+            current_length = len(packed)
+            if current_length > padded_size:
+                raise ValueError(f"Packed data length ({current_length}) exceeds target length ({padded_size})")
+
+            padding_length = padded_size - current_length
+            packed.extend(b'\x00' * padding_length)
+        packed = encode_pack(packed)
+        return packed
 
     def encode(self, data):
         for block in common.iterate(data=data, size=self.block_size,
                                     func=bytearray, truncate=False):
-            yield self._pack(block=block)
-        yield self._pack(block=self.EOF)
+            yield self._pack(block=block, padded_size=self.unencrypted_size)
+        yield self._pack(block=self.EOF, padded_size=self.unencrypted_size)
 
     def decode(self, data):
         data = iter(data)
         while True:
-            length, = _take_fmt(data, self.prefix_fmt)
-            frame = _take_len(data, length)
+            pack = decode_pack(data, self.chunk_size)
+            length, = _take_fmt(pack, self.prefix_fmt)
+            frame = _take_len(pack, length)
             block = self.checksum.decode(frame)
             if block == self.EOF:
                 log.debug('EOF frame detected')
