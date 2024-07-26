@@ -2,6 +2,7 @@ import binascii
 import functools
 import itertools
 import logging
+from math import erfc
 
 import numpy as np
 import reedsolo
@@ -12,7 +13,7 @@ from . import common
 
 log = logging.getLogger(__name__)
 
-# 定义2/3 矩阵
+# 定义2/3矩阵
 TRELLIS = Trellis(
     memory=np.array([1, 1]),  # 2个1级移位寄存器
     g_matrix=np.array([
@@ -22,8 +23,23 @@ TRELLIS = Trellis(
 )
 
 # 创建RS编码器
-NSYM = 32
-rs = reedsolo.RSCodec(NSYM)  # 10个纠错字节
+NUM_SYMBOLS = 32
+rs_codec = reedsolo.RSCodec(NUM_SYMBOLS)  # number of ecc symbols (you can repair nsym/2 errors and nsym erasures.
+
+
+def ber_mqam(snr_db, M):
+    # 根据snr重新协商纠错数量
+    # Convert SNR from dB to linear scale
+    snr_linear = 10 ** (snr_db / 10.0)
+    # Calculate BER for M-QAM
+    ber = (2 * (np.sqrt(M) - 1) / (np.sqrt(M) * np.log2(M))) * \
+          erfc(np.sqrt(3 * snr_linear / (2 * (M - 1))))
+    return ber
+
+
+def set_rs_codec(snr_db):
+    global NUM_SYMBOLS
+    global rs_codec
 
 
 def encode_with_conv(data):
@@ -48,14 +64,14 @@ def encode_with_rs(data):
     if not isinstance(data, bytearray):
         data = bytearray(data)
     # 编码数据
-    encoded = rs.encode(data)
+    encoded = rs_codec.encode(data)
     return encoded
 
 
 def decode_with_rs(encoded_data):
     try:
         # 解码数据
-        decoded, _, _ = rs.decode(encoded_data)
+        decoded, _, _ = rs_codec.decode(encoded_data)
         return decoded
     except reedsolo.ReedSolomonError as e:
         import traceback
@@ -102,7 +118,7 @@ class Checksum:
 
 class Framer:
     chunk_size = 255
-    unencrypted_size = chunk_size - NSYM
+    unencrypted_size = chunk_size - NUM_SYMBOLS
     block_size = unencrypted_size - 1 - 4  # 1 bytes length, 4 bytes crc
     prefix_fmt = '>B'
     prefix_len = struct.calcsize(prefix_fmt)
