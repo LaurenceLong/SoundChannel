@@ -2,25 +2,15 @@ import binascii
 import functools
 import itertools
 import logging
+import struct
 from math import erfc
 
 import numpy as np
 import reedsolo
-import struct
 
-from commpy.channelcoding import conv_encode, viterbi_decode, Trellis
 from . import common
 
 log = logging.getLogger(__name__)
-
-# 定义2/3矩阵
-TRELLIS = Trellis(
-    memory=np.array([1, 1]),  # 2个1级移位寄存器
-    g_matrix=np.array([
-        [0o3, 0o2, 0o3],  # 第一个生成多项式
-        [0o2, 0o3, 0o2]  # 第二个生成多项式
-    ])
-)
 
 # 创建RS编码器
 NUM_SYMBOLS = 32
@@ -40,23 +30,6 @@ def ber_mqam(snr_db, M):
 def set_rs_codec(snr_db):
     global NUM_SYMBOLS
     global rs_codec
-
-
-def encode_with_conv(data):
-    length_bits = np.unpackbits(np.frombuffer(np.array([len(data)], dtype=np.int16), dtype=np.uint8))
-    encoded_data = conv_encode(np.concatenate((length_bits, data)), TRELLIS)
-    return encoded_data
-
-
-def decode_with_conv(encoded_data):
-    decoded = viterbi_decode(encoded_data, TRELLIS, tb_depth=20)
-    length_bits = decoded[:16]
-    bytes_little_endian = length_bits.reshape(2, 8)
-    bytes_big_endian = bytes_little_endian[::-1]
-    length = 0
-    for byte in bytes_big_endian:
-        length = (length << 8) | int(''.join(map(str, byte)), 2)
-    return decoded[16:16 + length]
 
 
 def encode_with_rs(data):

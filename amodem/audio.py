@@ -2,12 +2,11 @@
 
 import ctypes
 import logging
+import platform
+import string
 import time
 
 log = logging.getLogger(__name__)
-
-import platform
-import string
 
 PLATFORM_IS_WIN = platform.system() == 'Windows'
 WIN_ERR_CODES = ['pa.paNoError', 'pa.paNotInitialized', 'pa.paUnanticipatedHostError', 'pa.paInvalidChannelCount',

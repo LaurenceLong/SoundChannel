@@ -10,6 +10,8 @@ from tkinter import PhotoImage
 from tkinter import filedialog, Menu
 from tkinter import ttk, messagebox
 
+import keyboard
+
 from b64_encoded_files import icon_base64
 from sound_channel import SoundChannelBase, Event, Evt
 
@@ -250,6 +252,10 @@ class ChatInterface(tk.Tk):
         self.notify_monitor_thread = threading.Thread(target=self.notify_monitor, daemon=True)
         self.notify_monitor_thread.start()
 
+        # 在单独的线程中注册热键
+        self.hotkey_thread = threading.Thread(target=self.register_hotkey, daemon=True)
+        self.hotkey_thread.start()
+
     def notify_monitor(self):
         while True:
             event: Event = channel_base.notify_event_queue.get()
@@ -258,6 +264,21 @@ class ChatInterface(tk.Tk):
             elif event.key == Evt.NOTIFY_FILE:
                 self.add_file_block(None)
             self.scroll_to_bottom()
+
+    def register_hotkey(self):
+        keyboard.add_hotkey('ctrl+alt+c', self.hotkey_direct_copy)
+        keyboard.add_hotkey('ctrl+alt+v', self.hotkey_direct_paste)
+
+    def hotkey_direct_copy(self):
+        children = [child for child in self.history_frame.winfo_children() if isinstance(child, MessageBlock)]
+        if children:
+            self.clipboard_clear()
+            self.clipboard_append(children[-1].message)
+
+    def hotkey_direct_paste(self):
+        message = self.clipboard_get()
+        channel_base.send_message(message)
+        self.add_message_block(message)
 
     def on_frame_configure(self, event):
         self.history_canvas.configure(scrollregion=self.history_canvas.bbox("all"))

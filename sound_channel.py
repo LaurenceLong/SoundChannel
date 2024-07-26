@@ -28,7 +28,7 @@ log = logging.getLogger('__name__')
 
 
 class _tmp:
-    verbose = 2
+    verbose = 0
     quiet = False
 
 
@@ -37,7 +37,7 @@ _config_log(_tmp())
 MSG_NAME = "\\msg_str/"
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
-kb_per_s = 80
+kb_per_s = 32
 CFG = bitrates[kb_per_s]
 CFG.silence_start = CFG.silence_stop = 0.15
 CFG.timeout = float("inf")
