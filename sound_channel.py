@@ -419,7 +419,7 @@ class SoundChannelBase:
                 self.notify_event_queue.put(Event(Evt.NOTIFY_NEGOT, TYPE_SEND, o1=kbps))
                 if self.reload_send_speed(kbps):
                     self.notify_event_queue.put(
-                        Event(Evt.NOTIFY_MSG, f"Negotiate sent speed as {kbps} kbps"))
+                        Event(Evt.NOTIFY_MSG, f"Negotiate your sent speed as {kbps} kbps"))
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV):
@@ -428,7 +428,7 @@ class SoundChannelBase:
                 self.notify_event_queue.put(Event(Evt.NOTIFY_NEGOT, TYPE_RECV, o1=kbps))
                 if self.reload_recv_speed(kbps):
                     self.notify_event_queue.put(
-                        Event(Evt.NOTIFY_MSG, f"Negotiate recv speed as {kbps} kbps"))
+                        Event(Evt.NOTIFY_MSG, f"Negotiate your recv speed as {kbps} kbps"))
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV_STATE):
