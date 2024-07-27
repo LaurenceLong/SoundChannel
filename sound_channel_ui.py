@@ -12,11 +12,12 @@ from tkinter import ttk, messagebox
 
 import keyboard
 
+import sound_channel
 from b64_encoded_files import icon_base64
-from sound_channel import SoundChannelBase, Event, Evt
+from sound_channel import bitrates, SoundChannelBase, Event, Evt
 
 # 版本号
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 channel_base = SoundChannelBase()
 
 
@@ -208,6 +209,24 @@ class ChatInterface(tk.Tk):
         top_frame = tk.Frame(self)
         top_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
+        # 添加两个下拉框
+        self.rates_desc_dict, self.rates_int_dict = self.generate_rates()
+        dropdown1_frame = tk.Frame(top_frame)
+        dropdown1_frame.pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(dropdown1_frame, text="Send:").pack(side=tk.LEFT)
+        self.dropdown1 = ttk.Combobox(dropdown1_frame, values=list(self.rates_desc_dict.keys()), width=10)
+        self.dropdown1.pack(side=tk.LEFT, padx=(0, 5))
+        self.dropdown1.set(self.rates_int_dict.get(sound_channel.INIT_SEND_kbps))
+        self.dropdown1.bind("<<ComboboxSelected>>", self.on_dropdown1_select)
+
+        dropdown2_frame = tk.Frame(top_frame)
+        dropdown2_frame.pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(dropdown2_frame, text="Recv:").pack(side=tk.LEFT)
+        self.dropdown2 = ttk.Combobox(dropdown2_frame, values=list(self.rates_desc_dict.keys()), width=10)
+        self.dropdown2.pack(side=tk.LEFT, padx=(0, 5))
+        self.dropdown2.set(self.rates_int_dict.get(sound_channel.INIT_RECV_kbps))
+        self.dropdown2.bind("<<ComboboxSelected>>", self.on_dropdown2_select)
+
         self.handshake_button = tk.Button(top_frame, text="Handshake", command=self.handshake)
         self.handshake_button.pack(side=tk.LEFT, padx=(0, 5))
 
@@ -255,6 +274,22 @@ class ChatInterface(tk.Tk):
         # 在单独的线程中注册热键
         self.hotkey_thread = threading.Thread(target=self.register_hotkey, daemon=True)
         self.hotkey_thread.start()
+
+    def generate_rates(self):
+        desc_to_int = {}
+        int_to_desc = {}
+        for key, val in bitrates.items():
+            desc_to_int[f"{key}_QAM{val.Npoints}"] = key
+            int_to_desc[key] = f"{key}_QAM{val.Npoints}"
+        return desc_to_int, int_to_desc
+
+    def on_dropdown1_select(self, event):
+        desc = self.dropdown1.get()
+        channel_base.reload_send_speed(self.rates_desc_dict[desc])
+
+    def on_dropdown2_select(self, event):
+        desc = self.dropdown2.get()
+        channel_base.reload_recv_speed(self.rates_desc_dict[desc])
 
     def notify_monitor(self):
         while True:
@@ -359,7 +394,6 @@ class ChatInterface(tk.Tk):
     def destroy(self):
         # 在这里添加其他线程的销毁动作
         channel_base.stop()
-        time.sleep(1)
         # 调用父类的 destroy 方法
         super().destroy()
 
