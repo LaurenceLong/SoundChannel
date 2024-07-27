@@ -14,7 +14,7 @@ import keyboard
 
 import sound_channel
 from b64_encoded_files import icon_base64
-from sound_channel import bitrates, SoundChannelBase, Event, Evt
+from sound_channel import SoundChannelBase, Event, Evt
 
 # 版本号
 VERSION = "0.2.0"
@@ -51,7 +51,7 @@ class MessageBlock(tk.Frame):
 
         self.text = tk.Text(self, wrap=tk.WORD, height=3, width=50, bg="white", relief=tk.FLAT)
         if local:
-            self.text.insert(tk.END, f"You: {message}")
+            self.text.insert(tk.END, f"Local: {message}")
         else:
             self.text.insert(tk.END, f"Remote: {message}")
         self.text.config(state=tk.DISABLED)
@@ -85,6 +85,10 @@ class FileBlock(tk.Frame):
             self.file_name = os.path.basename(self.file_path)
             self.file_size = os.path.getsize(self.file_path)
         self.start_time = None
+        self.is_sender = False
+        self.is_done = False
+        self.is_cancelled = False
+        self.is_failed = False
 
         self.info_frame = tk.Frame(self, bg="white")
         self.info_frame.pack(fill=tk.X)
@@ -104,36 +108,85 @@ class FileBlock(tk.Frame):
         self.progress = ttk.Progressbar(self.progress_frame, orient="horizontal", length=200, mode="determinate")
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        self.cancel_button = tk.Button(self.progress_frame, text="Cancel", command=self.cancel_transfer)
+        self.cancel_button.pack(side=tk.RIGHT, padx=(5, 0))
+
         self.open_folder_button = tk.Button(self.progress_frame, text="OpenFolder", command=self.open_folder)
         self.open_folder_button.pack(side=tk.RIGHT, padx=(5, 0))
         self.open_folder_button.config(state=tk.DISABLED)
 
         if self.file_path:
+            self.is_sender = True
             event_queue = channel_base.send_event_queue
         else:
             event_queue = channel_base.recv_event_queue
         self.start_transfer(event_queue)
 
+    @property
+    def is_finished(self):
+        return self.is_done or self.is_failed or self.is_cancelled
+
     def start_transfer(self, event_queue):
+        if self.is_finished:
+            return
         # 尝试获取 SEND_FILE_START 事件
-        event: Event = get_event(event_queue, timeout=2, attempts=5,
+        event: Event = get_event(event_queue, timeout=1, attempts=10,
                                  expected_key=[Evt.SEND_FILE_START, Evt.RECV_FILE_START])
         if event:
             if event.key == Evt.RECV_FILE_START:
                 self.file_name = event.value
                 self.file_label.config(text=self.desc + self.file_name)
                 self.file_size = event.o1
-            # 如果获取到了 SEND_FILE_START 事件，尝试获取 SEND_TIME 事件
+            # 如果获取到了 SEND_FILE_START 事件，尝试获取 SPEND_TIME 事件
             event = event_queue.get()  # 这里假设能立即获取到，不需要超时
             if event:
                 estimate_time = event.value
                 self.start_time = time.time()
                 threading.Thread(target=self.simulate_transfer, args=(estimate_time, event_queue), daemon=True).start()
 
+    def set_transfer_freeze(self, desc, color):
+        # 冻结当前进度
+        current_progress = self.progress["value"]
+        # 在描述中添加 "Cancelled"
+        current_text = self.file_label.cget("text")
+        self.file_label.config(text=f"{current_text} - {desc}")
+        # 将进度条变成灰色
+        style = ttk.Style()
+        style.configure("Failed.Horizontal.TProgressbar", background=color)
+        self.progress.configure(style="Failed.Horizontal.TProgressbar")
+        # 更新进度标签
+        current_size = int(self.file_size * (current_progress / 100))
+        size_text = f"{self.format_size(current_size)}/{self.format_size(self.file_size)} - {desc}"
+        self.size_label.config(text=size_text)
+        # 禁用打开文件夹按钮
+        self.open_folder_button.config(state=tk.DISABLED)
+        self.cancel_button.config(state=tk.DISABLED)
+
+    def cancel_transfer(self, inform_remote=True):
+        if self.is_done or self.is_cancelled:
+            return
+        self.is_cancelled = True
+        if inform_remote:
+            if self.is_sender:
+                channel_base.negot_remote_cancel_recv()
+                channel_base.cancel_data_sending()
+            else:
+                channel_base.negot_remote_cancel_send()
+                channel_base.cancel_data_receiving()
+        self.set_transfer_freeze("Cancelled", "gray")
+
+    def set_transfer_failed(self):
+        if self.is_finished:
+            return
+        self.is_failed = True
+        self.set_transfer_freeze("Failed", "pink")
+
     def simulate_transfer(self, estimate_time, event_queue):
         duration = 0.05
         loops = int(estimate_time / duration)
         for i in range(loops):
+            if self.is_finished:
+                return
             progress_val = i * 99 / loops
             try:
                 if i < loops - 1:
@@ -142,9 +195,17 @@ class FileBlock(tk.Frame):
                     event: Event = event_queue.get()
                 if event.key == Evt.SEND_FINISH:
                     progress_val = 100
+                    self.is_done = True
                 elif event.key == Evt.RECV_FILE_FINISH:
                     progress_val = 100
+                    self.is_done = True
                     self.file_path = event.value
+                elif event.key == Evt.FILE_FAIL:
+                    self.set_transfer_failed()
+                    break
+                elif event.key == Evt.FILE_CANCEL:
+                    self.cancel_transfer(inform_remote=False)
+                    break
             except queue.Empty:
                 pass
             self.progress["value"] = progress_val
@@ -210,21 +271,20 @@ class ChatInterface(tk.Tk):
         top_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
         # 添加两个下拉框
-        self.rates_desc_dict, self.rates_int_dict = self.generate_rates()
         dropdown1_frame = tk.Frame(top_frame)
         dropdown1_frame.pack(side=tk.LEFT, padx=(0, 5))
         tk.Label(dropdown1_frame, text="Send:").pack(side=tk.LEFT)
-        self.dropdown1 = ttk.Combobox(dropdown1_frame, values=list(self.rates_desc_dict.keys()), width=10)
+        self.dropdown1 = ttk.Combobox(dropdown1_frame, values=list(sound_channel.RATES_DESC_TO_IDX.keys()), width=10)
         self.dropdown1.pack(side=tk.LEFT, padx=(0, 5))
-        self.dropdown1.set(self.rates_int_dict.get(sound_channel.INIT_SEND_kbps))
+        self.dropdown1.set(sound_channel.RATES_IDX_TO_DESC.get(sound_channel.INIT_SEND_kbps))
         self.dropdown1.bind("<<ComboboxSelected>>", self.on_dropdown1_select)
 
         dropdown2_frame = tk.Frame(top_frame)
         dropdown2_frame.pack(side=tk.LEFT, padx=(0, 5))
         tk.Label(dropdown2_frame, text="Recv:").pack(side=tk.LEFT)
-        self.dropdown2 = ttk.Combobox(dropdown2_frame, values=list(self.rates_desc_dict.keys()), width=10)
+        self.dropdown2 = ttk.Combobox(dropdown2_frame, values=list(sound_channel.RATES_DESC_TO_IDX.keys()), width=10)
         self.dropdown2.pack(side=tk.LEFT, padx=(0, 5))
-        self.dropdown2.set(self.rates_int_dict.get(sound_channel.INIT_RECV_kbps))
+        self.dropdown2.set(sound_channel.RATES_IDX_TO_DESC.get(sound_channel.INIT_RECV_kbps))
         self.dropdown2.bind("<<ComboboxSelected>>", self.on_dropdown2_select)
 
         self.handshake_button = tk.Button(top_frame, text="Handshake", command=self.handshake)
@@ -275,30 +335,34 @@ class ChatInterface(tk.Tk):
         self.hotkey_thread = threading.Thread(target=self.register_hotkey, daemon=True)
         self.hotkey_thread.start()
 
-    def generate_rates(self):
-        desc_to_int = {}
-        int_to_desc = {}
-        for key, val in bitrates.items():
-            desc_to_int[f"{key}_QAM{val.Npoints}"] = key
-            int_to_desc[key] = f"{key}_QAM{val.Npoints}"
-        return desc_to_int, int_to_desc
-
     def on_dropdown1_select(self, event):
         desc = self.dropdown1.get()
-        channel_base.reload_send_speed(self.rates_desc_dict[desc])
+        kbps = sound_channel.RATES_DESC_TO_IDX[desc]
+        channel_base.negot_remote_recv_speed(kbps)
+        channel_base.reload_send_speed(kbps)
 
     def on_dropdown2_select(self, event):
         desc = self.dropdown2.get()
-        channel_base.reload_recv_speed(self.rates_desc_dict[desc])
+        kbps = sound_channel.RATES_DESC_TO_IDX[desc]
+        channel_base.negot_remote_send_speed(kbps)
+        channel_base.reload_recv_speed(kbps)
 
     def notify_monitor(self):
         while True:
             event: Event = channel_base.notify_event_queue.get()
             if event.key == Evt.NOTIFY_MSG:
                 self.add_message_block(event.value, local=False)
+                self.scroll_to_bottom()
             elif event.key == Evt.NOTIFY_FILE:
                 self.add_file_block(None)
-            self.scroll_to_bottom()
+                self.scroll_to_bottom()
+            elif event.key == Evt.NOTIFY_NEGOT:
+                negot_type = event.value
+                kbps = event.o1
+                if negot_type == sound_channel.TYPE_SEND:
+                    self.dropdown1.set(sound_channel.RATES_IDX_TO_DESC.get(int(kbps)))
+                else:
+                    self.dropdown2.set(sound_channel.RATES_IDX_TO_DESC.get(int(kbps)))
 
     def register_hotkey(self):
         keyboard.add_hotkey('ctrl+alt+c', self.hotkey_direct_copy)
