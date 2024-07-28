@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import traceback
+import zlib
 
 import numpy as np
 import pyaudio
@@ -90,6 +91,38 @@ def get_application_path():
     else:
         # 如果是在开发环境中运行
         return os.path.dirname(os.path.abspath(__file__))
+
+
+def compress_data(bytes_data):
+    return zlib.compress(bytes_data)
+
+
+def decompress_temp_file(compressed_file, decompressed_file=None):
+    # 创建一个新的临时文件来存储解压后的数据
+    decompressed_file = decompressed_file or tempfile.TemporaryFile()
+    # 将压缩文件的指针移到开始
+    compressed_file.seek(0)
+    # 创建一个zlib解压对象
+    decompressor = zlib.decompressobj()
+    try:
+        # 分块读取并解压数据
+        chunk_size = 1024 * 1024  # 1MB chunks
+        while True:
+            chunk = compressed_file.read(chunk_size)
+            if not chunk:
+                break
+            decompressed_chunk = decompressor.decompress(chunk)
+            decompressed_file.write(decompressed_chunk)
+        # 确保所有剩余的数据都被刷新出来
+        final_chunk = decompressor.flush()
+        decompressed_file.write(final_chunk)
+        # 将解压文件的指针移到开始
+        decompressed_file.seek(0)
+        return decompressed_file
+    except zlib.error as e:
+        log.info(f"Uncompress fail: {e}")
+        decompressed_file.close()
+        return None
 
 
 CWD = get_application_path()
@@ -255,18 +288,25 @@ class SoundChannelBase:
             task_queue.put(WrappedData(VAL_MSG_NAME, data))
 
     def receive_data_signal(self, stream, config, dst=None, stop_event: threading.Event = None):
+        compressed_file = self.receive_data_signal_compressed(stream, config, stop_event=stop_event)
+        if compressed_file is None:
+            return
+        decompressed = decompress_temp_file(compressed_file, decompressed_file=dst)
+        return decompressed
+
+    def receive_data_signal_compressed(self, stream, config, stop_event: threading.Event = None):
         reader = Reader(stream, data_type=common.loads)
         signal = itertools.chain.from_iterable(reader)
 
         pylab = common.Dummy()
         detector = Detector(config=config, pylab=pylab)
         receiver = Receiver(config=config, pylab=pylab)
-        dst = dst or tempfile.TemporaryFile()
+        dst = tempfile.TemporaryFile()
         try:
             log.info("Waiting for carrier tone: %.1f kHz" % (config.Fc / 1e3))
             signal, amplitude, freq_error = detector.run(signal, stop_event=stop_event)
 
-            freq = 1 / (1.0 + freq_error)  # receiver"s compensated frequency
+            freq = 1 / (1.0 + freq_error)  # receiver's compensated frequency
             log.debug("Frequency correction: %.3f ppm" % ((freq - 1) * 1e6))
 
             gain = 1.0 / amplitude
@@ -280,7 +320,7 @@ class SoundChannelBase:
         except BaseException:  # pylint: disable=broad-except
             traceback.print_exc()
             log.error("Decoding failed")
-            return False
+            return None
         finally:
             dst.flush()
             dst.seek(0)
@@ -297,7 +337,8 @@ class SoundChannelBase:
         training_duration = sender.offset
         log.info("Sending %.3f seconds of training audio" % (training_duration / config.Fs))
         framer = Framer()
-        bits = framing.encode(bytes_data, framer=framer, cut_eof=self.cut_eof)
+        compressed = compress_data(bytes_data)
+        bits = framing.encode(compressed, framer=framer, cut_eof=self.cut_eof)
         log.info("Starting modulation")
         sender.modulate(bits=bits, stop_event=stop_event)
 
