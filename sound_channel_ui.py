@@ -137,12 +137,9 @@ class FileBlock(tk.Frame):
                 self.file_name = event.value
                 self.file_label.config(text=self.desc + self.file_name)
                 self.file_size = event.o1
-            # 如果获取到了 SEND_FILE_START 事件，尝试获取 SPEND_TIME 事件
-            event = event_queue.get()  # 这里假设能立即获取到，不需要超时
-            if event:
-                estimate_time = event.value
-                self.start_time = time.time()
-                threading.Thread(target=self.simulate_transfer, args=(estimate_time, event_queue), daemon=True).start()
+            estimate_time = event.o2
+            self.start_time = time.time()
+            threading.Thread(target=self.simulate_transfer, args=(estimate_time, event_queue), daemon=True).start()
 
     def set_transfer_freeze(self, desc, color):
         # 冻结当前进度
@@ -163,7 +160,7 @@ class FileBlock(tk.Frame):
         self.cancel_button.config(state=tk.DISABLED)
 
     def cancel_transfer(self, inform_remote=True):
-        if self.is_done or self.is_cancelled:
+        if self.is_finished:
             return
         self.is_cancelled = True
         if inform_remote:

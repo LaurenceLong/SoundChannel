@@ -96,7 +96,6 @@ CWD = get_application_path()
 
 
 class Evt(Enum):
-    SPEND_TIME = "SEND_TIME"
     SEND_FILE_START = "SEND_FILE_START"
     SEND_FINISH = "SEND_FINISH"
     RECV_FILE_START = "RECV_FILE_START"
@@ -145,6 +144,7 @@ class WrappedData:
 class SoundChannelBase:
 
     def __init__(self, ):
+        self.cut_eof = True
         self.recv_cfg = create_config(INIT_SEND_kbps)
         self.send_cfg = create_config(INIT_RECV_kbps)
         self.negot_cfg = Configuration(Fs=32e3, Npoints=8, frequencies=self.send_cfg.negotiate_frequencies)
@@ -275,7 +275,7 @@ class SoundChannelBase:
             sampler = sampling.Sampler(signal,
                                        sampling.defaultInterpolator,
                                        freq=freq)
-            receiver.run(sampler, gain=1.0 / amplitude, output=dst)
+            receiver.run(sampler, gain=1.0 / amplitude, output=dst, cut_eof=self.cut_eof)
             return dst
         except BaseException:  # pylint: disable=broad-except
             traceback.print_exc()
@@ -288,8 +288,6 @@ class SoundChannelBase:
 
     def send_data_bytes(self, stream, config, bytes_data, stop_event: threading.Event, send_event_queue: queue.Queue):
         t0 = time.time()
-        send_time = config.silence_start + config.silence_stop + len(bytes_data) * 8 / config.modem_bps
-        send_event_queue.put(Event(Evt.SPEND_TIME, send_time))
 
         sender = Sender(stream, config=config)
         # pre-padding audio with silence (priming the audio sending queue)
@@ -299,7 +297,7 @@ class SoundChannelBase:
         training_duration = sender.offset
         log.info("Sending %.3f seconds of training audio" % (training_duration / config.Fs))
         framer = Framer()
-        bits = framing.encode(bytes_data, framer=framer)
+        bits = framing.encode(bytes_data, framer=framer, cut_eof=self.cut_eof)
         log.info("Starting modulation")
         sender.modulate(bits=bits, stop_event=stop_event)
 
@@ -470,8 +468,11 @@ class SoundChannelBase:
                 wrapped_data = task_queue.get(timeout=0.1)
                 self.send_handshake(stream, config, wrapped_data, stop_event, send_event_queue)
                 if wrapped_data.get_name() != VAL_MSG_NAME:
-                    send_event_queue.put(Event(Evt.SEND_FILE_START, ""))
-                    self.send_data_bytes(stream, config, wrapped_data.get_data(), stop_event, send_event_queue)
+                    bytes_data = wrapped_data.get_data()
+                    send_time = config.silence_start + config.silence_stop + len(bytes_data) * 8 / config.modem_bps
+                    send_event_queue.put(
+                        Event(Evt.SEND_FILE_START, wrapped_data.get_name(), wrapped_data.get_size(), send_time))
+                    self.send_data_bytes(stream, config, bytes_data, stop_event, send_event_queue)
             except queue.Empty:
                 # 队列为空，继续循环
                 continue
@@ -503,13 +504,12 @@ class SoundChannelBase:
                     folder = os.path.join(CWD, "received")
                     if not os.path.exists(folder):
                         os.mkdir(folder)
+
                     file_name = handshake.get(KEY_NAME)
-
-                    listen_event_queue.put(Event(Evt.RECV_FILE_START, handshake.get(KEY_NAME), handshake.get(KEY_SIZE)))
-
                     send_time = config.silence_start + config.silence_stop + handshake.get(
                         KEY_SIZE) * 8 / config.modem_bps
-                    listen_event_queue.put(Event(Evt.SPEND_TIME, send_time))
+                    listen_event_queue.put(
+                        Event(Evt.RECV_FILE_START, handshake.get(KEY_NAME), handshake.get(KEY_SIZE), send_time))
 
                     f_path = os.path.join(folder, file_name)
                     with open(f_path, "wb+") as temp_file:
