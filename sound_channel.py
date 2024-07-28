@@ -147,7 +147,7 @@ class SoundChannelBase:
         self.cut_eof = True
         self.recv_cfg = create_config(INIT_SEND_kbps)
         self.send_cfg = create_config(INIT_RECV_kbps)
-        self.negot_cfg = Configuration(Fs=32e3, Npoints=8, frequencies=self.send_cfg.negotiate_frequencies)
+        self.negot_cfg = Configuration(Fs=32e3, Npoints=16, frequencies=self.send_cfg.negotiate_frequencies)
         self.negot_cfg.timeout = float("inf")
 
         self.data_interface = self.create_interface(self.send_cfg)
