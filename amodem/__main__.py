@@ -88,11 +88,11 @@ def FileType(mode, interface_factory=None):
 
 
 def get_volume_cmd(args):
-    volume_controllers = [
-        dict(test='pactl --version',
-             send='pactl set-sink-volume @DEFAULT_SINK@',
-             recv='pactl set-source-volume @DEFAULT_SOURCE@')
-    ]
+    volume_controllers = [{
+        'test': 'pactl --version',
+        'send': 'pactl set-sink-volume @DEFAULT_SINK@',
+        'recv': 'pactl set-source-volume @DEFAULT_SOURCE@'
+    }]
     if args.calibrate == 'auto':
         for c in volume_controllers:
             if os.system(c['test']) == 0:
@@ -106,7 +106,7 @@ def wrap(cls, stream, enable):
 
 def create_parser(description, interface_factory):
     p = argparse.ArgumentParser(description=description)
-    subparsers = p.add_subparsers()
+    subparsers = p.add_subparsers(required=True)
 
     # Modulator
     sender = subparsers.add_parser(

@@ -122,12 +122,6 @@ class Framer:
         packed = encode_pack(packed)
         return packed
 
-    # def encode(self, data):
-    #     for block in common.iterate(data=data, size=self.block_size,
-    #                                 func=bytearray, truncate=False):
-    #         yield self._pack(block=block, padded_size=self.unencrypted_size)
-    #     yield self._pack(block=self.EOF, padded_size=self.unencrypted_size)
-
     def encode(self, data, cut_eof=False):
         iterator = common.iterate(data=data, size=self.block_size,
                                   func=bytearray, truncate=False)
