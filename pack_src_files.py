@@ -19,10 +19,6 @@ src_files = [
     'test.txt',
 ]
 
-# 生成一个带有时间戳的 zip 文件名
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-zip_filename = f"source_files_{timestamp}.zip"
-
 
 def zip_files(file_list, zip_filename):
     with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -30,14 +26,18 @@ def zip_files(file_list, zip_filename):
             if os.path.isfile(file):
                 zipf.write(file, os.path.basename(file))
             elif os.path.isdir(file):
-                for root, _, files in os.walk(file):
+                for root, dirs, files in os.walk(file):
+                    # 排除 __pycache__ 文件夹
+                    dirs[:] = [d for d in dirs if d != '__pycache__']
                     for f in files:
                         file_path = os.path.join(root, f)
                         arcname = os.path.relpath(file_path, start=os.path.dirname(file))
                         zipf.write(file_path, arcname)
 
 
+# 生成一个带有时间戳的 zip 文件名
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+my_zip_filename = f"source_files_{timestamp}.zip"
 # 执行打包
-zip_files(src_files, zip_filename)
-
-print(f"Files have been zipped into {zip_filename}")
+zip_files(src_files, my_zip_filename)
+print(f"Files have been zipped into {my_zip_filename}")

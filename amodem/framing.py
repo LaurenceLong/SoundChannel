@@ -2,6 +2,7 @@ import binascii
 import functools
 import itertools
 import logging
+import queue
 import struct
 import time
 from math import erfc
@@ -122,20 +123,35 @@ class Framer:
         packed = encode_pack(packed)
         return packed
 
-    def encode(self, data, cut_eof=False):
-        iterator = common.iterate(data=data, size=self.block_size,
-                                  func=bytearray, truncate=False)
-
+    def encode(self, data, cut_eof=False, checksum_required=False):
+        iterator = common.iterate(data=data, size=self.block_size, func=bytearray, truncate=False)
         prev_block = next(iterator, None)
         for current_block in iterator:
-            yield self._pack(block=prev_block, padded_size=self.unencrypted_size)
+            packed = self._pack(block=prev_block, padded_size=self.unencrypted_size)
+            if checksum_required:
+                check_sum, = struct.unpack(self.checksum.fmt, bytes(packed[:self.checksum.size]))
+                yield packed, check_sum
+            else:
+                yield packed
             prev_block = current_block
+
         if prev_block is not None:
-            yield self._pack(block=prev_block, padded_size=self.unencrypted_size, cut_eof=cut_eof,
-                             is_last_block=cut_eof)
+            packed = self._pack(block=prev_block, padded_size=self.unencrypted_size, cut_eof=cut_eof,
+                                is_last_block=cut_eof)
+            if checksum_required:
+                check_sum, = struct.unpack(self.checksum.fmt, bytes(packed[:self.checksum.size]))
+                yield packed, check_sum
+            else:
+                yield packed
+
         if not cut_eof:
             # 添加EOF块
-            yield self._pack(block=self.EOF, padded_size=self.unencrypted_size)
+            packed = self._pack(block=self.EOF, padded_size=self.unencrypted_size)
+            if checksum_required:
+                check_sum, = struct.unpack(self.checksum.fmt, bytes(packed[:self.checksum.size]))
+                yield packed, check_sum
+            else:
+                yield packed
 
     def decode(self, data, cut_eof=False):
         data = iter(data)

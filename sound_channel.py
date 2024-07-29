@@ -20,7 +20,7 @@ from amodem.__main__ import _config_log
 from amodem.async_reader import AsyncReader
 from amodem.config import bitrates, Configuration
 from amodem.detect import Detector
-from amodem.framing import Framer
+from amodem.framing import Framer, BitPacker
 from amodem.recv import Receiver
 from amodem.send import Sender
 from amodem.stream import Reader
@@ -52,6 +52,7 @@ NEGOT_SEND = "NEGOT_SEND" + SPECIAL
 NEGOT_SNR = "NEGOT_SNR" + SPECIAL
 NEGOT_RECV_STATE = "NEGOT_RECV_STATE" + SPECIAL
 NEGOT_SEND_STATE = "NEGOT_SEND_STATE" + SPECIAL
+NEGOT_RESEND_FRAME = "NEGOT_RESEND_FRAME" + SPECIAL
 
 STATE_PASS = "pass"
 STATE_FAIL = "fail"
@@ -63,6 +64,39 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 INIT_SEND_kbps = 40
 INIT_RECV_kbps = 40
+
+
+class Evt(Enum):
+    SEND_FILE_START = "SEND_FILE_START"
+    SEND_FINISH = "SEND_FINISH"
+    RECV_FILE_START = "RECV_FILE_START"
+    RECV_FILE_FINISH = "RECV_FILE_FINISH"
+    FILE_FAIL = "FILE_FAIL"
+    FILE_CANCEL = "FILE_CANCEL"
+    NOTIFY_MSG = "NOTIFY_MSG"
+    NOTIFY_FILE = "NOTIFY_FILE"
+    NOTIFY_NEGOT = "NOTIFY_NEGOT"
+
+
+class Event:
+    def __init__(self, key, value, o1=None, o2=None, o3=None):
+        self.key = key
+        self.value = value
+        self.o1 = o1
+        self.o2 = o2
+        self.o3 = o3
+
+
+def get_application_path():
+    if getattr(sys, "frozen", False):
+        # 如果是打包后的应用程序
+        return os.path.dirname(sys.executable)
+    else:
+        # 如果是在开发环境中运行
+        return os.path.dirname(os.path.abspath(__file__))
+
+
+CWD = get_application_path()
 
 
 def generate_rates():
@@ -82,15 +116,6 @@ def create_config(kbps):
     config.silence_start = config.silence_stop = 0.1
     config.timeout = float("inf")
     return config
-
-
-def get_application_path():
-    if getattr(sys, "frozen", False):
-        # 如果是打包后的应用程序
-        return os.path.dirname(sys.executable)
-    else:
-        # 如果是在开发环境中运行
-        return os.path.dirname(os.path.abspath(__file__))
 
 
 def compress_data(bytes_data):
@@ -123,31 +148,6 @@ def decompress_temp_file(compressed_file, decompressed_file=None):
         log.info(f"Uncompress fail: {e}")
         decompressed_file.close()
         return None
-
-
-CWD = get_application_path()
-
-
-class Evt(Enum):
-    SEND_FILE_START = "SEND_FILE_START"
-    SEND_FINISH = "SEND_FINISH"
-    RECV_FILE_START = "RECV_FILE_START"
-    RECV_FILE_FINISH = "RECV_FILE_FINISH"
-    FILE_FAIL = "FILE_FAIL"
-    FILE_CANCEL = "FILE_CANCEL"
-    NOTIFY_MSG = "NOTIFY_MSG"
-    NOTIFY_FILE = "NOTIFY_FILE"
-    NOTIFY_NEGOT = "NOTIFY_NEGOT"
-    RESEND_FRAME = "RESEND_FRAME"
-
-
-class Event:
-    def __init__(self, key, value, o1=None, o2=None, o3=None):
-        self.key = key
-        self.value = value
-        self.o1 = o1
-        self.o2 = o2
-        self.o3 = o3
 
 
 class WrappedData:
@@ -202,6 +202,7 @@ class SoundChannelBase:
         self.recv_event_queue = queue.Queue()  # recv event to ui
         self.send_event_queue = queue.Queue()  # send event to ui
         self.negot_event_queue = queue.Queue()  # send negotiate event to ui
+        self.frame_resend_queue = queue.Queue()  # send negotiate event to ui
 
         self.data_task_queue = queue.Queue()
         self.negot_task_queue = queue.Queue()
@@ -336,8 +337,9 @@ class SoundChannelBase:
 
         training_duration = sender.offset
         log.info("Sending %.3f seconds of training audio" % (training_duration / config.Fs))
-        framer = Framer()
+        log.info("Starting compress data")
         compressed = compress_data(bytes_data)
+        framer = Framer()
         bits = framing.encode(compressed, framer=framer, cut_eof=self.cut_eof)
         log.info("Starting modulation")
         sender.modulate(bits=bits, stop_event=stop_event)
