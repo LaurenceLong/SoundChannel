@@ -1,6 +1,7 @@
 import itertools
 import json
 import logging
+import math
 import os
 import queue
 import sys
@@ -9,6 +10,7 @@ import threading
 import time
 import traceback
 import zlib
+from collections import defaultdict
 from enum import Enum
 
 import numpy as np
@@ -31,7 +33,7 @@ log = logging.getLogger("__name__")
 
 
 class _tmp:
-    verbose = 0
+    verbose = 3
     quiet = False
 
 
@@ -45,7 +47,7 @@ KEY_QUIET = "is_quiet"
 VAL_MSG_NAME = "\\msg_str/"
 
 SEPARATOR = ";;"
-MULTI_FILE_SEP = ".multipart."
+MULTI_FILE_SEP = ".part."
 
 NEGOT_TAG = "~!@#$%^&*()_+"
 NEGOT_START = "NEGOT_START" + NEGOT_TAG
@@ -67,7 +69,8 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 INIT_SEND_kbps = 40
 INIT_RECV_kbps = 40
-MULTI_FILE_SIZE_kBs = 1024 * 512
+FILE_UNIT_KB = 512
+MULTI_FILE_SIZE_BYTES = 1024 * FILE_UNIT_KB
 
 
 class Evt(Enum):
@@ -117,7 +120,8 @@ RATES_DESC_TO_IDX, RATES_IDX_TO_DESC = generate_rates()
 
 def create_config(kbps):
     config = bitrates[kbps]
-    config.silence_start = config.silence_stop = 0.1
+    config.silence_start = 0.1
+    config.silence_stop = 0.4
     config.timeout = float("inf")
     return config
 
@@ -167,57 +171,46 @@ def merge_files(file_list, output_file):
 
 class TaggedQueue:
     def __init__(self):
-        self.queues = {}
-        self.lock = threading.Lock()
-        self.conditions = {}
+        self.queues = defaultdict(queue.Queue)
+        self.lock = threading.RLock()
+        self.condition = threading.Condition(self.lock)
+        self.events = defaultdict(threading.Event)
 
     def _put(self, item, tag):
         with self.lock:
-            if tag not in self.queues:
-                self.queues[tag] = queue.Queue()
             self.queues[tag].put(item)
-            if tag in self.conditions:
-                self.conditions[tag].notify()
+            self.events[tag].set()
+            self.condition.notify_all()
 
     def _get(self, tag, block=True, timeout=None):
         with self.lock:
-            if tag not in self.queues:
-                self.queues[tag] = queue.Queue()
-
             if not block:
-                if self.queues[tag].empty():
-                    raise queue.Empty(f"No item available for tag {tag}")
-                return self.queues[tag].get_nowait()
+                return self._get_nowait(tag)
 
-            if timeout is not None:
-                end_time = time.time() + timeout
+            end_time = None if timeout is None else time.time() + timeout
 
             while True:
-                if not self.queues[tag].empty():
-                    return self.queues[tag].get_nowait()
-
-                if timeout is not None:
-                    remaining = end_time - time.time()
-                    if remaining <= 0:
+                try:
+                    return self._get_nowait(tag)
+                except queue.Empty:
+                    if end_time is not None and time.time() >= end_time:
                         raise queue.Empty(f"Timeout waiting for item with tag {tag}")
 
-                if tag not in self.conditions:
-                    self.conditions[tag] = threading.Condition(self.lock)
+                    self.events[tag].clear()
+                    self.condition.wait(timeout)
+                    if not self.events[tag].is_set():
+                        continue
 
-                if timeout is None:
-                    self.conditions[tag].wait()
-                else:
-                    self.conditions[tag].wait(remaining)
+    def _get_nowait(self, tag):
+        if self.queues[tag].empty():
+            raise queue.Empty(f"No item available for tag {tag}")
+        return self.queues[tag].get_nowait()
 
     def _empty(self, tag):
-        que: queue.Queue = self.queues.get(tag)
-        if que:
-            return que.empty()
-        else:
-            return True
+        return self.queues[tag].empty()
 
 
-class QueueWithTag(TaggedQueue):
+class QueueWithTag:
     def __init__(self, tagged_queue, tag):
         super().__init__()
         self.tagged_queue: TaggedQueue = tagged_queue
@@ -230,7 +223,7 @@ class QueueWithTag(TaggedQueue):
         return self.tagged_queue._get(self.tag, block=block, timeout=timeout)
 
     def empty(self):
-        return self._empty(self.tag)
+        return self.tagged_queue._empty(self.tag)
 
 
 class WrappedData:
@@ -335,6 +328,7 @@ class FrameManager:
         self.frames_list.insert(index, frame.frame_id)
         # 插入frame到字典中
         self.frames_dict[frame.frame_id] = frame
+        return index
 
     def find_insert_position(self, frame_id):
         # 二分查找找到插入位置
@@ -364,6 +358,11 @@ class FrameWriter(FrameManager):
         self.filename = filename
         self.dst = dst
         self.resend_frame_callable = frame_resend_callable
+        self.error_frame_ids = []
+        self.err_counter = 0
+        self.frame_size = framing.Framer.chunk_size
+        self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / self.frame_size)
+        self.error_limit = self.expect_frame_cnt // 32  # 限制每32个Frame出现一次error
 
     def get_dst(self):
         return self.dst
@@ -374,12 +373,19 @@ class FrameWriter(FrameManager):
             return False
         return True
 
-    def write(self, frame_id, data):
+    def write(self, data, frame_id):
         frame = Frame(frame_id, data)
         if data == b'':
-            self.resend_frame_callable(frame_id)
+            self.err_counter += 1
+            if self.err_counter > self.error_limit:
+                raise Exception(f"Too many error frames > {self.error_limit}")
+            if self.error_frame_ids and frame_id % 32 == 0:
+                self.resend_frame_callable(self.error_frame_ids)
+                self.error_frame_ids.clear()
         else:
-            self.insert_frame(frame)
+            index = self.insert_frame(frame)
+            if index < frame_id:
+                self.err_counter -= 1
 
     def flush(self):
         self.dst.write(self.read())
@@ -703,8 +709,9 @@ class SoundChannelBase:
         msg = WrappedData(VAL_MSG_NAME, NEGOT_SEND_STATE + f"{SEPARATOR}{STATE_FAIL}", quiet=True)
         self.negot_task_queue.put(msg)
 
-    def negot_resend_frame(self, frame_id):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_RESEND_FRAME + f"{SEPARATOR}{frame_id}", quiet=True)
+    def negot_resend_frame(self, frame_id_list):
+        frame_ids_str = ','.join([str(_) for _ in frame_id_list])
+        msg = WrappedData(VAL_MSG_NAME, NEGOT_RESEND_FRAME + f"{SEPARATOR}{frame_ids_str}", quiet=True)
         self.negot_task_queue.put(msg)
 
     def negot_resend_whole(self, filename):
@@ -764,9 +771,11 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_FRAME):
             try:
-                frame_id = int(msg.split(SEPARATOR)[-1])
+                frame_ids_str = msg.split(SEPARATOR)[-1]
+                frame_ids = [int(_) for _ in frame_ids_str.split(",")]
                 if self.rfbi_bits is not None:
-                    self.rfbi_bits.arrange_resend_frame(frame_id)
+                    for frame_id in frame_ids:
+                        self.rfbi_bits.arrange_resend_frame(frame_id)
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_WHOLE):
@@ -785,8 +794,7 @@ class SoundChannelBase:
                 traceback.print_exc()
 
     def send_loop(self, stream_loader, config_loader, task_queue: QueueWithTag, ready_event: threading.Event,
-                  stop_event: threading.Event,
-                  send_event_queue: queue.Queue):
+                  stop_event: threading.Event, send_event_queue: queue.Queue):
         ready_event.set()
         while self.listening:
             try:
@@ -853,7 +861,9 @@ class SoundChannelBase:
                         if origin_filename in self.merge_files_record:
                             tails_status = self.merge_files_record[origin_filename]
                             tails_status[filename] = True
-                            if all(list(tails_status.values())):
+                            tails_status_values = list(tails_status.values())
+                            log.info(f"Received multipart file: {sum(tails_status_values)}/{len(tails_status_values)}")
+                            if all(tails_status_values):
                                 f_path_list = [os.path.join(folder, _) for _ in tails_status]
                                 merge_files(f_path_list, os.path.join(folder, origin_filename))
                         listen_event_queue.put(Event(Evt.RECV_FILE_FINISH, f_path))

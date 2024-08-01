@@ -24,7 +24,7 @@ class Receiver:
         self.Nsym = config.Nsym
         self.Tsym = config.Tsym
         self.iters_per_update = 100  # [ms]
-        self.iters_per_report = 1000  # [ms]
+        self.iters_per_report = 4 * 1000  # [ms]
         self.modem_bitrate = config.modem_bps
         self.equalizer = equalizer.Equalizer(config)
         self.carrier_index = config.carrier_index
@@ -150,7 +150,7 @@ class Receiver:
     def _report_progress(self, noise, sampler):
         e = np.array([e for v in noise.values() for e in v])
         noise.clear()
-        log.debug(
+        log.info(
             'Got  %10.3f kB, SNR: %5.2f dB, drift: %+5.2f ppm',
             self.stats['rx_bits'] / 8e3,
             -10 * np.log10(np.mean(np.abs(e) ** 2)),
@@ -176,7 +176,7 @@ class Receiver:
         else:
             for frame, frame_id in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err,
                                                          use_fid=use_fid):
-                output.write(frame_id, frame)
+                output.write(frame, frame_id)
                 self.output_size += len(frame)
 
     def report(self):

@@ -14,7 +14,6 @@ from . import calib
 from . import main
 from .config import bitrates
 
-
 try:
     import argcomplete
 except ImportError:
@@ -115,7 +114,7 @@ def create_parser(description, interface_factory):
         '-i', '--input', help='input file (use "-" for stdin).')
     sender.add_argument(
         '-o', '--output', help='output file (use "-" for stdout).'
-        ' if not specified, `aplay` tool will be used.')
+                               ' if not specified, `aplay` tool will be used.')
     sender.add_argument(
         '-g', '--gain', type=float, default=1.0,
         help='Modulator gain (defaults to 1)')
@@ -200,10 +199,14 @@ def _config_log(args):
         level, fmt = 'INFO', '%(message)s'
     elif args.verbose == 1:
         level, fmt = 'DEBUG', '%(message)s'
-    elif args.verbose >= 2:
+    elif args.verbose == 2:
         level, fmt = ('DEBUG', '%(asctime)s %(levelname)-10s '
                                '%(message)-100s '
                                '%(filename)s:%(lineno)d')
+    elif args.verbose > 2:
+        level, fmt = ('INFO', '%(asctime)s %(levelname)-10s '
+                              '%(message)-100s '
+                              '%(filename)s:%(lineno)d')
     if args.quiet:
         level, fmt = 'WARNING', '%(message)s'
     logging.basicConfig(level=level, format=fmt)

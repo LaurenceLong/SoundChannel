@@ -17,7 +17,7 @@ from b64_encoded_files import icon_base64
 from sound_channel import SoundChannelBase, Event, Evt
 
 # 版本号
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 channel_base = SoundChannelBase()
 
 
@@ -29,6 +29,7 @@ def get_event(event_queue, timeout, attempts, expected_key=None):
         timeout (int): 获取事件的超时时间。
         attempts (int): 获取事件的尝试次数。
         expected_key: 如果提供，则只返回匹配的事件。
+
 
     Returns:
         Event: 获取到的事件，如果未获取到则返回None。

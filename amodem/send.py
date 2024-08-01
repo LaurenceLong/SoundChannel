@@ -20,7 +20,7 @@ class Sender:
         self.carriers = config.carriers / config.Nfreq
         self.pilot = config.carriers[config.carrier_index]
         self.silence = np.zeros(equalizer.silence_length * config.Nsym)
-        self.iters_per_report = config.baud  # report once per second
+        self.iters_per_report = 4 * config.baud  # report once per second
         self.padding = [0] * config.bits_per_baud
         self.equalizer = equalizer.Equalizer(config)
 
@@ -50,4 +50,4 @@ class Sender:
             self.write(np.dot(symbols, self.carriers))
             if i % self.iters_per_report == 0:
                 total_bits = i * Nfreq * self.modem.bits_per_symbol
-                log.debug('Sent %10.3f kB', total_bits / 8e3)
+                log.info('Sent %10.3f kB', total_bits / 8e3)
