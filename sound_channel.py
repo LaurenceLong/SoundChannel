@@ -358,8 +358,8 @@ class FrameWriter(FrameManager):
         self.filename = filename
         self.dst = dst
         self.resend_frame_callable = frame_resend_callable
+        self.tbd_frame_ids = set()
         self.error_frame_ids = []
-        self.err_counter = 0
         self.frame_size = framing.Framer.chunk_size
         self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / self.frame_size)
         self.error_limit = self.expect_frame_cnt // 32  # 限制每32个Frame出现一次error
@@ -376,16 +376,18 @@ class FrameWriter(FrameManager):
     def write(self, data, frame_id):
         frame = Frame(frame_id, data)
         if data == b'':
-            self.err_counter += 1
-            if self.err_counter > self.error_limit:
+            self.tbd_frame_ids.add(frame_id)
+            self.error_frame_ids.append(frame_id)
+            if len(self.tbd_frame_ids) > self.error_limit:
                 raise Exception(f"Too many error frames > {self.error_limit}")
             if self.error_frame_ids and frame_id % 32 == 0:
                 self.resend_frame_callable(self.error_frame_ids)
                 self.error_frame_ids.clear()
         else:
-            index = self.insert_frame(frame)
-            if index < frame_id:
-                self.err_counter -= 1
+            if frame_id in self.tbd_frame_ids:
+                self.tbd_frame_ids.remove(frame_id)
+                log.info(f"Remote resend frame_id={frame_id} frame received success")
+            self.insert_frame(frame)
 
     def flush(self):
         self.dst.write(self.read())
@@ -541,8 +543,9 @@ class SoundChannelBase:
         temp_dst = tempfile.TemporaryFile()
         if self.use_frame_id:
             fw = FrameWriter(filename, temp_dst, self.negot_resend_frame)
-            self.receive_data_signal_compressed(stream, config, dst=fw, stop_event=stop_event)
-            if fw.validation():
+            ret_fw = self.receive_data_signal_compressed(stream, config, dst=fw, stop_event=stop_event)
+            if ret_fw:
+                fw.validation()
                 fw.flush()
                 compressed_file = fw.get_dst()
             else:
