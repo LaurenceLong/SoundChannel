@@ -518,7 +518,7 @@ class SoundChannelBase:
             self.filename_to_path[filename] = file_path
             with open(file_path, "rb") as fd:
                 data = fd.read()
-            chunk_size = MULTI_FILE_SIZE_kBs
+            chunk_size = MULTI_FILE_SIZE_BYTES
             chunk_list = []
             for i in range(0, len(data), chunk_size):
                 chunk = data[i:i + chunk_size]
