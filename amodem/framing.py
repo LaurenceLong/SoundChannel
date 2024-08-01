@@ -2,9 +2,7 @@ import binascii
 import functools
 import itertools
 import logging
-import queue
 import struct
-import time
 from math import erfc
 
 import numpy as np
@@ -49,13 +47,14 @@ def decode_with_rs(encoded_data):
         decoded, _, _ = rs_codec.decode(encoded_data)
         return decoded
     except reedsolo.ReedSolomonError as e:
-        import traceback
-        traceback.print_exc()
-        return None
+        # import traceback
+        # traceback.print_exc()
+        return encoded_data
 
 
 def encode_pack(data):
-    return encode_with_rs(data)
+    encoded = encode_with_rs(data)
+    return encoded
 
 
 def decode_pack(encoded_data, chunk_size):
@@ -104,14 +103,25 @@ class Framer:
     unencrypted_size = chunk_size - NUM_SYMBOLS
     block_size = unencrypted_size - 1 - 4  # 1 bytes length, 4 bytes crc
     prefix_fmt = '>B'
+    uint_32_fmt = '>L'
     prefix_len = struct.calcsize(prefix_fmt)
     checksum = Checksum()
 
     EOF = b''
 
-    def _pack(self, block, padded_size=None, cut_eof=False, is_last_block=False):
+    def __init__(self):
+        self.frame_id = 0
+
+    def _pack(self, block, padded_size=None, cut_eof=False, is_last_block=False, use_fid=False):
         frame = self.checksum.encode(block, cut_eof=cut_eof, is_last_block=is_last_block)
-        packed = bytearray(struct.pack(self.prefix_fmt, len(frame)) + frame)
+        frame_id = self.frame_id
+        self.frame_id += 1
+        if not use_fid:
+            packed = bytearray(struct.pack(self.prefix_fmt, len(frame)) + frame)
+        else:
+            # 尾部加frame_id
+            packed = bytearray(
+                struct.pack(self.prefix_fmt, len(frame)) + frame + struct.pack(self.uint_32_fmt, frame_id))
 
         if padded_size is not None:
             current_length = len(packed)
@@ -121,54 +131,73 @@ class Framer:
             padding_length = padded_size - current_length
             packed.extend(b'\x00' * padding_length)
         packed = encode_pack(packed)
-        return packed
+        return packed, frame_id
 
-    def encode(self, data, cut_eof=False, checksum_required=False):
-        iterator = common.iterate(data=data, size=self.block_size, func=bytearray, truncate=False)
+    def encode(self, data, cut_eof=False, use_fid=False):
+        if not use_fid:
+            iterator = common.iterate(data=data, size=self.block_size, func=bytearray, truncate=False)
+        else:
+            # 4 bytes frame_id
+            iterator = common.iterate(data=data, size=self.block_size - 4, func=bytearray, truncate=False)
         prev_block = next(iterator, None)
         for current_block in iterator:
-            packed = self._pack(block=prev_block, padded_size=self.unencrypted_size)
-            if checksum_required:
-                check_sum, = struct.unpack(self.checksum.fmt, bytes(packed[:self.checksum.size]))
-                yield packed, check_sum
-            else:
+            packed, frame_id = self._pack(block=prev_block, padded_size=self.unencrypted_size, use_fid=use_fid)
+            if not use_fid:
                 yield packed
+            else:
+                yield packed, frame_id
+
             prev_block = current_block
 
         if prev_block is not None:
-            packed = self._pack(block=prev_block, padded_size=self.unencrypted_size, cut_eof=cut_eof,
-                                is_last_block=cut_eof)
-            if checksum_required:
-                check_sum, = struct.unpack(self.checksum.fmt, bytes(packed[:self.checksum.size]))
-                yield packed, check_sum
-            else:
+            packed, frame_id = self._pack(block=prev_block, padded_size=self.unencrypted_size, cut_eof=cut_eof,
+                                          is_last_block=cut_eof, use_fid=use_fid)
+            if not use_fid:
                 yield packed
+            else:
+                yield packed, frame_id
 
         if not cut_eof:
             # 添加EOF块
-            packed = self._pack(block=self.EOF, padded_size=self.unencrypted_size)
-            if checksum_required:
-                check_sum, = struct.unpack(self.checksum.fmt, bytes(packed[:self.checksum.size]))
-                yield packed, check_sum
-            else:
+            packed, frame_id = self._pack(block=self.EOF, padded_size=self.unencrypted_size)
+            if not use_fid:
                 yield packed
+            else:
+                yield packed, frame_id
 
-    def decode(self, data, cut_eof=False):
+    def decode(self, data, cut_eof=False, raise_err=True, use_fid=False):
         data = iter(data)
         while True:
-            pack = decode_pack(data, self.chunk_size)
-            length, = _take_fmt(pack, self.prefix_fmt)
-            frame = _take_len(pack, length)
-            block, eof_detected = self.checksum.decode(frame, cut_eof=cut_eof)
-            if block == self.EOF:
-                log.debug('EOF frame detected')
-                return
+            try:
+                pack = decode_pack(data, self.chunk_size)
+                length, = _take_fmt(pack, self.prefix_fmt)
+                frame = _take_len(pack, length)
+                frame_id, = _take_fmt(pack, self.uint_32_fmt)
+                block, eof_detected = self.checksum.decode(frame, cut_eof=cut_eof)
+                if block == self.EOF:
+                    log.debug('EOF frame detected')
+                    return
 
-            yield block
+                if not use_fid:
+                    yield block
+                else:
+                    yield block, frame_id
 
-            if eof_detected:
-                log.debug('End frame detected')
-                return
+                if eof_detected:
+                    log.debug('End frame detected')
+                    return
+
+                self.frame_id = frame_id
+            except Exception as e:
+                if raise_err:
+                    raise e
+
+                frame_id = self.frame_id
+                self.frame_id += 1
+                if not use_fid:
+                    yield b''
+                else:
+                    yield b'', frame_id
 
 
 def _take_fmt(data, fmt):
@@ -209,12 +238,17 @@ class BitPacker:
 
 
 @chain_wrapper
-def encode(data, framer=None, cut_eof=False):
+def encode(data, framer=None, cut_eof=False, use_fid=False):
     converter = BitPacker()
     framer = framer or Framer()
-    for frame in framer.encode(data, cut_eof=cut_eof):
-        for byte in frame:
-            yield converter.to_bits[byte]
+    if not use_fid:
+        for frame in framer.encode(data, cut_eof=cut_eof, use_fid=use_fid):
+            for byte in frame:
+                yield converter.to_bits[byte]
+    else:
+        for frame, frame_id in framer.encode(data, cut_eof=cut_eof, use_fid=use_fid):
+            for byte in frame:
+                yield converter.to_bits[byte], frame_id
 
 
 @chain_wrapper
@@ -225,7 +259,11 @@ def _to_bytes(bits):
         yield [converter.to_byte[chunk]]
 
 
-def decode_frames(bits, framer=None, cut_eof=False):
+def decode_frames(bits, framer=None, cut_eof=False, raise_err=True, use_fid=False):
     framer = framer or Framer()
-    for frame in framer.decode(_to_bytes(bits), cut_eof=cut_eof):
-        yield bytes(frame)
+    if not use_fid:
+        for frame in framer.decode(_to_bytes(bits), cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+            yield bytes(frame)
+    else:
+        for frame, frame_id in framer.decode(_to_bytes(bits), cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+            yield bytes(frame), frame_id

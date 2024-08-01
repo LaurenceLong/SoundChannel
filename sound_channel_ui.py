@@ -72,7 +72,7 @@ class MessageBlock(tk.Frame):
 
 
 class FileBlock(tk.Frame):
-    def __init__(self, master, file_path):
+    def __init__(self, master, file_path, file_size=None):
         super().__init__(master, bd=1, relief=tk.SOLID, padx=5, pady=5, bg="white")
         if file_path is None:
             self.desc = "Receive "
@@ -83,7 +83,10 @@ class FileBlock(tk.Frame):
             self.desc = "Send "
             self.file_path = os.path.abspath(file_path)
             self.file_name = os.path.basename(self.file_path)
-            self.file_size = os.path.getsize(self.file_path)
+            if file_size is None:
+                self.file_size = os.path.getsize(self.file_path)
+            else:
+                self.file_size = file_size
         self.start_time = None
         self.is_sender = False
         self.is_done = False
@@ -351,7 +354,9 @@ class ChatInterface(tk.Tk):
                 self.add_message_block(event.value, local=False)
                 self.scroll_to_bottom()
             elif event.key == Evt.NOTIFY_FILE:
-                self.add_file_block(None)
+                filename = event.value
+                file_size = event.o1
+                self.add_file_block(filename, file_size=file_size)
                 self.scroll_to_bottom()
             elif event.key == Evt.NOTIFY_NEGOT:
                 negot_type = event.value
@@ -375,6 +380,7 @@ class ChatInterface(tk.Tk):
         message = self.clipboard_get()
         channel_base.send_message(message)
         self.add_message_block(message)
+        self.scroll_to_bottom()
 
     def on_frame_configure(self, event):
         self.history_canvas.configure(scrollregion=self.history_canvas.bbox("all"))
@@ -385,7 +391,7 @@ class ChatInterface(tk.Tk):
     def send_f(self):
         if self.selected_file:
             channel_base.send_file(file_path=self.selected_file)
-            self.add_file_block(self.selected_file)
+            # self.add_file_block(self.selected_file)
             self.reset_input_field()
         else:
             message = self.input_field.get("1.0", tk.END).strip()
@@ -399,9 +405,13 @@ class ChatInterface(tk.Tk):
         block = MessageBlock(self.history_frame, message, local=local)
         block.pack(fill=tk.X, padx=5, pady=2)
 
-    def add_file_block(self, file_path):
-        block = FileBlock(self.history_frame, file_path)
+    def add_file_block(self, file_path, file_size=None):
+        block = FileBlock(self.history_frame, file_path, file_size=file_size)
         block.pack(fill=tk.X, padx=5, pady=2)
+
+    def scroll_to_top(self):
+        self.history_canvas.update_idletasks()
+        self.history_canvas.yview_moveto(0)
 
     def scroll_to_bottom(self):
         self.history_canvas.update_idletasks()
@@ -450,7 +460,7 @@ class ChatInterface(tk.Tk):
     def clear_history(self):
         for widget in self.history_frame.winfo_children():
             widget.destroy()
-        self.scroll_to_bottom()
+        self.scroll_to_top()
 
     def destroy(self):
         # 在这里添加其他线程的销毁动作

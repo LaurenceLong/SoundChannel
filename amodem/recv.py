@@ -44,7 +44,7 @@ class Receiver:
         self.plt.plot(np.abs(S))
         self.plt.plot(equalizer.prefix)
         errors = bits != equalizer.prefix
-        if any(errors):
+        if sum(errors) / len(errors) > (framing.NUM_SYMBOLS / 2) / framing.Framer.chunk_size:
             msg = f'Incorrect prefix: {sum(errors)} errors'
             raise ValueError(msg)
         log.debug('Prefix OK')
@@ -67,13 +67,13 @@ class Receiver:
         )
 
         self.plt.figure()
-        self.plt.plot(np.arange(order+lookahead), coeffs)
+        self.plt.plot(np.arange(order + lookahead), coeffs)
 
         equalization_filter = dsp.FIR(h=coeffs)
         log.debug('Training completed')
         # Pre-load equalization filter with the signal (+lookahead)
         equalized = list(equalization_filter(signal))
-        equalized = equalized[prefix+lookahead:-postfix+lookahead]
+        equalized = equalized[prefix + lookahead:-postfix + lookahead]
         self._verify_training(equalized, train_symbols)
         return equalization_filter
 
@@ -95,7 +95,7 @@ class Receiver:
             log.debug('%5.1f kHz: SNR = %5.2f dB', freq / 1e3, snr)
             self._constellation(symbols[:, i], train_symbols[:, i],
                                 f'$F_c = {freq} Hz$', index=i)
-        assert error_rate == 0, error_rate
+        assert error_rate < (framing.NUM_SYMBOLS / 2) / framing.Framer.chunk_size, error_rate
         log.debug('Training verified')
 
     def _bitstream(self, symbols, error_handler):
@@ -141,7 +141,7 @@ class Receiver:
 
     def _update_sampler(self, errors, sampler):
         err = np.array([e for v in errors.values() for e in v])
-        err = np.mean(np.angle(err))/(2*np.pi) if err.size else 0
+        err = np.mean(np.angle(err)) / (2 * np.pi) if err.size else 0
         errors.clear()
 
         sampler.freq -= self.freq_err_gain * err
@@ -157,7 +157,7 @@ class Receiver:
             (1.0 - sampler.freq) * 1e6
         )
 
-    def run(self, sampler, gain, output, cut_eof=False):
+    def run(self, sampler, gain, output, cut_eof=False, raise_err=True, use_fid=False):
         log.debug('Receiving')
         symbols = dsp.Demux(sampler, omegas=self.omegas, Nsym=self.Nsym)
         self._prefix(symbols, gain=gain)
@@ -168,9 +168,16 @@ class Receiver:
         bitstream = self._demodulate(sampler, symbols)
         bitstream = itertools.chain.from_iterable(bitstream)
 
-        for frame in framing.decode_frames(bitstream, cut_eof=cut_eof):
-            output.write(frame)
-            self.output_size += len(frame)
+        if not use_fid:
+            for frame in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err,
+                                               use_fid=use_fid):
+                output.write(frame)
+                self.output_size += len(frame)
+        else:
+            for frame, frame_id in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err,
+                                                         use_fid=use_fid):
+                output.write(frame_id, frame)
+                self.output_size += len(frame)
 
     def report(self):
         if self.stats:
@@ -198,7 +205,7 @@ class Receiver:
             width = np.ceil(Nfreq / float(height))
             self.plt.subplot(height, width, index + 1)
 
-        theta = np.linspace(0, 2*np.pi, 1000)
+        theta = np.linspace(0, 2 * np.pi, 1000)
         y = np.array(y)
         self.plt.plot(y.real, y.imag, '.')
         self.plt.plot(np.cos(theta), np.sin(theta), ':')
@@ -206,5 +213,5 @@ class Receiver:
         self.plt.plot(points.real, points.imag, '+')
         self.plt.grid('on')
         self.plt.axis('equal')
-        self.plt.axis(np.array([-1, 1, -1, 1])*1.1)
+        self.plt.axis(np.array([-1, 1, -1, 1]) * 1.1)
         self.plt.title(title)
