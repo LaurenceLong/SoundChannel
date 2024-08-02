@@ -44,7 +44,7 @@ KEY_MSG = "msg"
 KEY_SIZE = "size"
 KEY_QUIET = "is_quiet"
 
-VAL_MSG_NAME = "\\msg_str/"
+VAL_MSG_NAME = "<msg_str>"
 
 SEP = ";;"
 MULTI_FILE_SEP = ".part."
@@ -73,6 +73,7 @@ INIT_SEND_kbps = 40
 INIT_RECV_kbps = 40
 FILE_UNIT_KB = 512
 MULTI_FILE_SIZE_BYTES = 1024 * FILE_UNIT_KB
+NEGOT_CFG = Configuration(Fs=32e3, Npoints=16, frequencies=Configuration.negotiate_frequencies)
 
 
 class Evt(Enum):
@@ -129,6 +130,13 @@ def create_config(kbps):
     config.silence_stop = 0.4
     config.timeout = float("inf")
     return config
+
+
+def cal_send_time(config: Configuration, data_bytes_size):
+    data_per_frame = (framing.Framer.block_size - 4)  # 4 bytes frame_id
+    silence_time = config.silence_start + (250 + 50 + 200 + 50) / 1000 + config.silence_stop
+    data_time = (math.ceil(data_bytes_size / data_per_frame) * framing.Framer.chunk_size) * 8 / config.modem_bps
+    return silence_time + data_time
 
 
 def compress_data(bytes_data):
@@ -189,6 +197,22 @@ def check_local_existing_file(filename, file_crc32, part_name_list, part_crc32_l
             if not check_crc32(part_name, part_crc32_list[i]):
                 needed_part_indexes.append(i)
     return needed_part_indexes
+
+
+def find_increasing_sequence(numbers, n=4):
+    if len(numbers) < n:
+        return None
+    count = 1
+    start = numbers[0]
+    for i in range(1, len(numbers)):
+        if numbers[i] == numbers[i - 1] + 1:
+            count += 1
+            if count == n:
+                return start
+        else:
+            count = 1
+            start = numbers[i]
+    return None
 
 
 def merge_files(file_list, output_file, delete_on_finish=True):
@@ -298,29 +322,47 @@ class ResendFrameBitsIterator:
     def __init__(self, data_with_fid, filename=None):
         self.data_with_fid = data_with_fid
         self.filename = UNKNOWN if filename is None else filename
-        self.current_fid = 0
+        self.last_fid = -1
         self.id_to_frame_bits = {}
         self.resend_queue = queue.Queue()
         self.current_bits = iter([])  # 用于存储当前正在处理的位序列
+        self.can_iter_resend = False
 
     def __iter__(self):
         return self
 
-    def get_next_bits(self):
-        if not self.resend_queue.empty():
+    def get_resend_bits(self):
+        while not self.resend_queue.empty():
             fid = self.resend_queue.get()
             if fid in self.id_to_frame_bits:
+                self.last_fid = fid
                 return iter(self.id_to_frame_bits[fid])
-            # 如果找不到请求重发的帧，继续获取下一个
+        return None  # 表示重发队列已经空了
+
+    def get_next_bits(self):
+        if self.can_iter_resend:
+            resend_bits = self.get_resend_bits()
+            if resend_bits is not None:
+                return resend_bits
+            self.can_iter_resend = False  # 重发队列为空，切换回正常模式
+
+        # 如果找不到请求重发的帧，继续获取下一个
         try:
             bits = next(self.data_with_fid)
             fid = next(self.data_with_fid)
             if fid not in self.id_to_frame_bits:
                 self.id_to_frame_bits[fid] = []
             self.id_to_frame_bits[fid].extend(bits)
-            self.current_fid = fid
-            return iter(bits)
+            if self.last_fid != fid:
+                # make sure fid changes
+                self.can_iter_resend = True
+                self.resend_queue.put(fid)
+                return self.get_next_bits()  # 递归调用以处理新加入的重发帧
+            else:
+                self.last_fid = fid
+                return iter(bits)
         except StopIteration:
+            self.can_iter_resend = True
             if self.resend_queue.empty():
                 raise StopIteration
             return self.get_next_bits()
@@ -335,6 +377,11 @@ class ResendFrameBitsIterator:
     def arrange_resend_frame(self, frame_id):
         if frame_id in self.id_to_frame_bits:
             self.resend_queue.put(frame_id)
+
+    def arrange_resend_frames_from_id(self, frame_id):
+        for fid in range(frame_id, max(self.id_to_frame_bits.keys()) + 1):
+            if fid in self.id_to_frame_bits:
+                self.resend_queue.put(fid)
 
 
 class Frame:
@@ -361,6 +408,10 @@ class FrameManager:
         existing_frames = set(self.frames_list)
 
         return sorted(all_frames - existing_frames)
+
+    @property
+    def missing_frame_ids(self):
+        return set(self.get_missing_frames())
 
     def insert_frame(self, frame):
         # 检查frame是否已经存在
@@ -398,18 +449,23 @@ class FrameManager:
 
 
 class FrameWriter(FrameManager):
-    def __init__(self, filename, dst, negot_resend_frame):
+    def __init__(self, filename, dst, modem_bps, negot_resend_frame):
         super().__init__()
         self.filename = UNKNOWN if filename is None else filename
         self.dst = dst
         self.negot_resend_frame = negot_resend_frame
-        self.tbd_frame_ids = set()
-        self.error_frame_ids = []
-        self.frame_size_bytes = framing.Framer.chunk_size
-        self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / self.frame_size_bytes)
-        self.num_iters_per_err = 32
-        self.error_limit = self.expect_frame_cnt // self.num_iters_per_err  # 限制每n个Frame出现一次error
-        self.last_frame_id = 0
+
+        self.paused_error_frame_id = None
+        self.error_cnt_after_paused = 0
+
+        frame_bytes_size = framing.Framer.chunk_size
+        self.frame_per_second = (modem_bps / 8) // frame_bytes_size
+        self.latent_time_secs = cal_send_time(NEGOT_CFG, 1) + 1
+        self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / frame_bytes_size)
+        self.error_limit = int(self.frame_per_second * self.latent_time_secs)
+        self.num_frames_per_check = max(1, self.frame_per_second)
+        self.num_sequential_missing = max(2, int(round(self.num_frames_per_check / 4)))
+        self.last_frame_id = -1
 
     def get_dst(self):
         return self.dst
@@ -421,24 +477,38 @@ class FrameWriter(FrameManager):
         return True
 
     def write(self, data, frame_id):
-        frame = Frame(frame_id, data)
         if data == b'':
             if abs(frame_id - self.last_frame_id) > self.expect_frame_cnt:
                 frame_id = self.last_frame_id + 1  # frame_id correction
-            self.tbd_frame_ids.add(frame_id)
-            self.error_frame_ids.append(frame_id)
-            if len(self.tbd_frame_ids) > self.error_limit:
+            if self.paused_error_frame_id is not None:
+                self.error_cnt_after_paused += 1
+            if len(self.missing_frame_ids) > self.error_limit or self.error_cnt_after_paused > self.error_limit:
                 raise Exception(f"Too many error frames > {self.error_limit}")
         else:
-            if frame_id in self.tbd_frame_ids:
-                self.tbd_frame_ids.remove(frame_id)
-                log.info(f"Remote resend frame_id={frame_id} frame received success")
+            if frame_id in self.missing_frame_ids:
+                log.info(f"Retry receive frame success for frame_id={frame_id}")
+                if self.paused_error_frame_id == frame_id:
+                    self.paused_error_frame_id = None
+                    self.error_cnt_after_paused = 0
+            frame = Frame(frame_id, data)
             self.insert_frame(frame)
         # request resend missing frames
-        if self.error_frame_ids and frame_id % self.num_iters_per_err == 0:
-            self.negot_resend_frame(self.filename, self.error_frame_ids)
-            self.error_frame_ids.clear()
-        self.last_frame_id = frame_id
+        if frame_id % self.num_frames_per_check == 0:
+            missing_frame_ids = self.get_missing_frames()
+            if missing_frame_ids:
+                index = find_increasing_sequence(missing_frame_ids, n=self.num_sequential_missing)
+                arrange = []
+                for fid in missing_frame_ids:
+                    if fid != index:
+                        arrange.append(fid)
+                    else:
+                        arrange.append(index)
+                        arrange.append(-1)
+                        self.paused_error_frame_id = index
+                        break
+                self.negot_resend_frame(self.filename, arrange)
+        if frame_id > self.last_frame_id:
+            self.last_frame_id = frame_id
 
     def flush(self):
         self.dst.write(self.read())
@@ -468,7 +538,7 @@ class SoundChannelBase:
 
         self.recv_cfg = create_config(INIT_SEND_kbps)
         self.send_cfg = create_config(INIT_RECV_kbps)
-        self.negot_cfg = Configuration(Fs=32e3, Npoints=16, frequencies=self.send_cfg.negotiate_frequencies)
+        self.negot_cfg = NEGOT_CFG
         self.negot_cfg.timeout = float("inf")
 
         self.data_interface = self.create_interface(self.send_cfg)
@@ -499,6 +569,7 @@ class SoundChannelBase:
         self.negot_task_queue = QueueWithTag(self.sending_task_queue, "negot_task_queue")
 
         self.sending_lock = threading.Lock()
+        self.sending_data_name = None
         self.ready_events = [threading.Event() for _ in range(4)]
         self.stop_events = [threading.Event() for _ in range(4)]
         self.running_threads = []
@@ -600,7 +671,7 @@ class SoundChannelBase:
     def receive_data_signal(self, stream, config, dst=None, filename=None, stop_event: threading.Event = None):
         temp_dst = tempfile.TemporaryFile()
         if self.use_frame_id:
-            fw = FrameWriter(filename, temp_dst, self.negot_resend_frame)
+            fw = FrameWriter(filename, temp_dst, config.modem_bps, self.negot_resend_frame)
             ret_fw = self.receive_data_signal_compressed(stream, config, dst=fw, stop_event=stop_event)
             if ret_fw:
                 fw.validation()
@@ -761,14 +832,14 @@ class SoundChannelBase:
     def negot_remote_send_speed(self, kbps):
         self.negot_message(NEGOT_SEND_SPEED, f"{kbps}")
 
-    def negot_remote_cancel_recv(self):
-        self.negot_message(NEGOT_RECV_STATE, f"{STATE_CANCEL}")
+    def negot_remote_cancel_recv(self, filename):
+        self.negot_message(NEGOT_RECV_STATE, f"{STATE_CANCEL}{SEP}{filename}")
 
-    def negot_remote_cancel_send(self):
-        self.negot_message(NEGOT_SEND_STATE, f"{STATE_CANCEL}")
+    def negot_remote_cancel_send(self, filename):
+        self.negot_message(NEGOT_SEND_STATE, f"{STATE_CANCEL}{SEP}{filename}")
 
-    def negot_local_recv_fail(self):
-        self.negot_message(NEGOT_SEND_STATE, f"{STATE_FAIL}")
+    def negot_local_recv_fail(self, filename):
+        self.negot_message(NEGOT_SEND_STATE, f"{STATE_FAIL}{SEP}{filename}")
 
     def negot_resend_frame(self, filename, frame_id_list):
         filename = UNKNOWN if filename is None else filename
@@ -791,6 +862,7 @@ class SoundChannelBase:
     def check_negot_msg(self, msg):
         if NEGOT_TAG in msg:
             log.debug("Negotiate msg: %s" % msg)
+            print("Negotiate msg: %s" % msg)
 
         if msg.startswith(NEGOT_SEND_SPEED):
             try:
@@ -826,16 +898,18 @@ class SoundChannelBase:
         elif msg.startswith(NEGOT_SEND_STATE):
             try:
                 items = msg.split(SEP)
-                state = items[-1]
+                state = items[1]
+                filename = items[2]
                 idx = 1  # send thread id
-                if state == STATE_FAIL:
-                    self.pause_loop_thread(idx)
-                    self.send_event_queue.put(Event(Evt.FILE_FAIL, ""))
-                    self.resume_loop_thread(idx)
-                elif state == STATE_CANCEL:
-                    self.pause_loop_thread(idx)
-                    self.resume_loop_thread(idx)
-                    self.send_event_queue.put(Event(Evt.FILE_CANCEL, ""))
+                if filename == self.sending_data_name:
+                    if state == STATE_FAIL:
+                        self.pause_loop_thread(idx)
+                        self.send_event_queue.put(Event(Evt.FILE_FAIL, ""))
+                        self.resume_loop_thread(idx)
+                    elif state == STATE_CANCEL:
+                        self.pause_loop_thread(idx)
+                        self.resume_loop_thread(idx)
+                        self.send_event_queue.put(Event(Evt.FILE_CANCEL, ""))
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_FRAME):
@@ -844,9 +918,16 @@ class SoundChannelBase:
                 filename = items[1]
                 frame_ids_str = items[-1]
                 frame_ids = [int(_) for _ in frame_ids_str.split(",") if _]
+                index = None
+                if frame_ids and frame_ids[-1] == -1:
+                    index = frame_ids[-2]
                 if self.rfbi_bits is not None and self.rfbi_bits.filename == filename:
                     for frame_id in frame_ids:
-                        self.rfbi_bits.arrange_resend_frame(frame_id)
+                        if frame_id != index:
+                            self.rfbi_bits.arrange_resend_frame(frame_id)
+                        else:
+                            self.rfbi_bits.arrange_resend_frames_from_id(frame_id)
+                            break
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_WHOLE):
@@ -906,16 +987,18 @@ class SoundChannelBase:
                 # 使用带超时的 get 操作替代 empty 检查和 sleep
                 wrapped_data = task_queue.get(timeout=0.1)
                 with self.sending_lock:
+                    self.sending_data_name = wrapped_data.get_name()
                     self.send_handshake(stream, config, wrapped_data, stop_event, send_event_queue)
                     if wrapped_data.get_name() != VAL_MSG_NAME:
                         file_path = wrapped_data.get_name()
-                        self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, file_path, o1=wrapped_data.get_size()))
-                        bytes_data = wrapped_data.get_data()
-                        send_time = config.silence_start + config.silence_stop + len(bytes_data) * 8 / config.modem_bps
-                        send_event_queue.put(
-                            Event(Evt.SEND_FILE_START, wrapped_data.get_name(), wrapped_data.get_size(), send_time))
+                        data_bytes_size = wrapped_data.get_size()
+                        self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, file_path, o1=data_bytes_size))
+
+                        send_time = cal_send_time(config, data_bytes_size)
+                        send_event_queue.put(Event(Evt.SEND_FILE_START, file_path, data_bytes_size, send_time))
 
                         filename = os.path.basename(file_path)
+                        bytes_data = wrapped_data.get_data()
                         self.send_data_bytes(stream, config, bytes_data, stop_event, send_event_queue,
                                              filename=filename)
             except queue.Empty:
@@ -946,9 +1029,9 @@ class SoundChannelBase:
                 else:
                     self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, None))
                     filename = os.path.basename(handshake.get(KEY_NAME))
-                    size_bytes = handshake.get(KEY_SIZE)
-                    send_time = config.silence_start + config.silence_stop + size_bytes * 8 / config.modem_bps
-                    listen_event_queue.put(Event(Evt.RECV_FILE_START, filename, size_bytes, send_time))
+                    bytes_size = handshake.get(KEY_SIZE)
+                    send_time = config.silence_start + config.silence_stop + bytes_size * 8 / config.modem_bps
+                    listen_event_queue.put(Event(Evt.RECV_FILE_START, filename, bytes_size, send_time))
 
                     f_path = os.path.join(RECEIVE_FOLDER, filename)
                     with open(f_path, "wb+") as temp_file:
@@ -969,7 +1052,7 @@ class SoundChannelBase:
                     else:
                         listen_event_queue.put(Event(Evt.FILE_FAIL, f_path))
                         if stream is self.r_stream and not stop_event.is_set():
-                            self.negot_local_recv_fail()
+                            self.negot_local_recv_fail(filename)
                             if MULTI_FILE_SEP in filename:
                                 log.info(f"Request resend multipart file: {filename}")
                                 self.negot_resend_whole(filename)

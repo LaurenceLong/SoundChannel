@@ -169,10 +169,10 @@ class FileBlock(tk.Frame):
         self.is_cancelled = True
         if inform_remote:
             if self.is_sender:
-                channel_base.negot_remote_cancel_recv()
+                channel_base.negot_remote_cancel_recv(self.file_name)
                 channel_base.cancel_data_sending()
             else:
-                channel_base.negot_remote_cancel_send()
+                channel_base.negot_remote_cancel_send(self.file_name)
                 channel_base.cancel_data_receiving()
         self.set_transfer_freeze("Cancelled", "gray")
 
