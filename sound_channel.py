@@ -795,7 +795,8 @@ class SoundChannelBase:
 
         if msg.startswith(NEGOT_SEND_SPEED):
             try:
-                kbps = int(msg.split(SEP)[-1])
+                items = msg.split(SEP)
+                kbps = int(items[-1])
                 self.notify_event_queue.put(Event(Evt.NOTIFY_NEGOT, TYPE_SEND, o1=kbps))
                 if self.reload_send_speed(kbps):
                     self.notify_event_queue.put(
@@ -804,7 +805,8 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV_SPEED):
             try:
-                kbps = int(msg.split(SEP)[-1])
+                items = msg.split(SEP)
+                kbps = int(items[-1])
                 self.notify_event_queue.put(Event(Evt.NOTIFY_NEGOT, TYPE_RECV, o1=kbps))
                 if self.reload_recv_speed(kbps):
                     self.notify_event_queue.put(
@@ -813,7 +815,8 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV_STATE):
             try:
-                state = msg.split(SEP)[-1]
+                items = msg.split(SEP)
+                state = items[-1]
                 idx = 0  # listen thread id
                 if state == STATE_CANCEL:
                     self.pause_loop_thread(idx)
@@ -823,7 +826,8 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_SEND_STATE):
             try:
-                state = msg.split(SEP)[-1]
+                items = msg.split(SEP)
+                state = items[-1]
                 idx = 1  # send thread id
                 if state == STATE_FAIL:
                     self.pause_loop_thread(idx)
@@ -837,8 +841,9 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_FRAME):
             try:
-                filename = msg.split(SEP)[1]
-                frame_ids_str = msg.split(SEP)[-1]
+                items = msg.split(SEP)
+                filename = items[1]
+                frame_ids_str = items[-1]
                 frame_ids = [int(_) for _ in frame_ids_str.split(",") if _]
                 if self.rfbi_bits is not None and self.rfbi_bits.filename == filename:
                     for frame_id in frame_ids:
@@ -847,7 +852,8 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_WHOLE):
             try:
-                filename = msg.split(SEP)[-1]
+                items = msg.split(SEP)
+                filename = items[-1]
                 data = self.filename_data_dict.get(filename)
                 if data is not None:
                     self.queue_send_data(self.data_task_queue, data, filename=filename)
@@ -855,10 +861,11 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_SEND_MULTIPART_FILE):
             try:
-                filename = msg.split(SEP)[1]
-                multipart_size = int(msg.split(SEP)[2])
-                file_crc32 = int(msg.split(SEP)[3])
-                part_crc32_list = [int(_) for _ in msg.split(SEP)[4].split(",") if _]
+                items = msg.split(SEP)
+                filename = items[1]
+                multipart_size = int(items[2])
+                file_crc32 = int(items[3])
+                part_crc32_list = [int(_) for _ in items[4].split(",") if _]
                 tails = gen_multipart_tails(multipart_size)
                 part_name_list = [f"{filename}{_}" for _ in tails]
                 needed_indexes = check_local_existing_file(filename, file_crc32, part_name_list, part_crc32_list)
@@ -872,8 +879,9 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV_MULTIPART_FILE):
             try:
-                filename = msg.split(SEP)[1]
-                needed_indexes = [int(_) for _ in msg.split(SEP)[2].split(",") if _]
+                items = msg.split(SEP)
+                filename = items[1]
+                needed_indexes = [int(_) for _ in items[2].split(",") if _]
                 checked = False
                 while not self.multipart_file_negot_queue.empty():
                     (file_path, file_size, i, part_name, chunk) = self.multipart_file_negot_queue.get()
