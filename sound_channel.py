@@ -791,7 +791,6 @@ class SoundChannelBase:
     def check_negot_msg(self, msg):
         if NEGOT_TAG in msg:
             log.debug("Negotiate msg: %s" % msg)
-            print("Negotiate msg: %s" % msg)
 
         if msg.startswith(NEGOT_SEND_SPEED):
             try:
