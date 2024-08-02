@@ -46,13 +46,14 @@ KEY_QUIET = "is_quiet"
 
 VAL_MSG_NAME = "\\msg_str/"
 
-SEPARATOR = ";;"
+SEP = ";;"
 MULTI_FILE_SEP = ".part."
 
 NEGOT_TAG = "~!@#$%^&*()_+"
 NEGOT_START = "NEGOT_START" + NEGOT_TAG
 NEGOT_RECV_SPEED = "NEGOT_RECV_SPEED" + NEGOT_TAG
 NEGOT_SEND_SPEED = "NEGOT_SEND_SPEED" + NEGOT_TAG
+NEGOT_RECV_MULTIPART_FILE = "NEGOT_RECV_MULTIPART_FILE" + NEGOT_TAG
 NEGOT_SEND_MULTIPART_FILE = "NEGOT_SEND_MULTIPART_FILE" + NEGOT_TAG
 NEGOT_RECV_STATE = "NEGOT_RECV_STATE" + NEGOT_TAG
 NEGOT_SEND_STATE = "NEGOT_SEND_STATE" + NEGOT_TAG
@@ -64,6 +65,7 @@ STATE_FAIL = "fail"
 STATE_CANCEL = "cancel"
 TYPE_SEND = "send"
 TYPE_RECV = "recv"
+UNKNOWN = "unknown"
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -104,6 +106,9 @@ def get_application_path():
 
 
 CWD = get_application_path()
+RECEIVE_FOLDER = os.path.join(CWD, "received")
+if not os.path.exists(RECEIVE_FOLDER):
+    os.mkdir(RECEIVE_FOLDER)
 
 
 def generate_rates():
@@ -158,27 +163,62 @@ def decompress_temp_file(compressed_file, decompressed_file=None):
         return None
 
 
+def get_multipart_tail(index):
+    return f"{MULTI_FILE_SEP}{index + 1:0>3}"
+
+
 def gen_multipart_tails(multipart_size):
-    return [f"{MULTI_FILE_SEP}{_ + 1:0>3}" for _ in range(multipart_size)]
+    return [get_multipart_tail(_) for _ in range(multipart_size)]
 
 
-def merge_files(file_list, output_file):
+def check_crc32(filename, file_crc32):
+    file_path = os.path.join(RECEIVE_FOLDER, filename)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        with open(file_path, 'rb') as fd:
+            tmp_crc32 = framing._checksum_func(fd.read())
+        return tmp_crc32 == file_crc32
+    return False
+
+
+def check_local_existing_file(filename, file_crc32, part_name_list, part_crc32_list):
+    needed_part_indexes = []
+    if check_crc32(filename, file_crc32):
+        pass  # file exists, no need transfer
+    else:
+        for i, part_name in enumerate(part_name_list):
+            if not check_crc32(part_name, part_crc32_list[i]):
+                needed_part_indexes.append(i)
+    return needed_part_indexes
+
+
+def merge_files(file_list, output_file, delete_on_finish=True):
     with open(output_file, 'w+b') as outfile:
         for file_path in file_list:
             with open(file_path, 'rb') as infile:
                 outfile.write(infile.read())
+            if delete_on_finish:
+                os.remove(file_path)
+
+
+class DualQueue:
+    def __init__(self):
+        self.high = queue.Queue()
+        self.low = queue.Queue()
 
 
 class TaggedQueue:
     def __init__(self):
-        self.queues = defaultdict(queue.Queue)
+        self.queues = defaultdict(DualQueue)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.events = defaultdict(threading.Event)
 
-    def _put(self, item, tag):
+    def _put(self, item, tag, high_prior=False):
         with self.lock:
-            self.queues[tag].put(item)
+            if high_prior:
+                self.queues[tag].high.put(item)
+            else:
+                self.queues[tag].low.put(item)
             self.events[tag].set()
             self.condition.notify_all()
 
@@ -202,12 +242,16 @@ class TaggedQueue:
                         continue
 
     def _get_nowait(self, tag):
-        if self.queues[tag].empty():
-            raise queue.Empty(f"No item available for tag {tag}")
-        return self.queues[tag].get_nowait()
+        try:
+            return self.queues[tag].high.get_nowait()
+        except queue.Empty:
+            try:
+                return self.queues[tag].low.get_nowait()
+            except queue.Empty:
+                raise queue.Empty(f"No item available for tag {tag}")
 
     def _empty(self, tag):
-        return self.queues[tag].empty()
+        return self.queues[tag].high.empty() and self.queues[tag].low.empty()
 
 
 class QueueWithTag:
@@ -216,8 +260,8 @@ class QueueWithTag:
         self.tagged_queue: TaggedQueue = tagged_queue
         self.tag = tag
 
-    def put(self, item):
-        self.tagged_queue._put(item, tag=self.tag)
+    def put(self, item, high_prior=False):
+        self.tagged_queue._put(item, tag=self.tag, high_prior=high_prior)
 
     def get(self, block=True, timeout=None):
         return self.tagged_queue._get(self.tag, block=block, timeout=timeout)
@@ -251,8 +295,9 @@ class WrappedData:
 
 
 class ResendFrameBitsIterator:
-    def __init__(self, data_with_fid):
+    def __init__(self, data_with_fid, filename=None):
         self.data_with_fid = data_with_fid
+        self.filename = UNKNOWN if filename is None else filename
         self.current_fid = 0
         self.id_to_frame_bits = {}
         self.resend_queue = queue.Queue()
@@ -353,16 +398,18 @@ class FrameManager:
 
 
 class FrameWriter(FrameManager):
-    def __init__(self, filename, dst, frame_resend_callable):
+    def __init__(self, filename, dst, negot_resend_frame):
         super().__init__()
-        self.filename = filename
+        self.filename = UNKNOWN if filename is None else filename
         self.dst = dst
-        self.resend_frame_callable = frame_resend_callable
+        self.negot_resend_frame = negot_resend_frame
         self.tbd_frame_ids = set()
         self.error_frame_ids = []
-        self.frame_size = framing.Framer.chunk_size
-        self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / self.frame_size)
-        self.error_limit = self.expect_frame_cnt // 32  # 限制每32个Frame出现一次error
+        self.frame_size_bytes = framing.Framer.chunk_size
+        self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / self.frame_size_bytes)
+        self.num_iters_per_err = 32
+        self.error_limit = self.expect_frame_cnt // self.num_iters_per_err  # 限制每n个Frame出现一次error
+        self.last_frame_id = 0
 
     def get_dst(self):
         return self.dst
@@ -376,18 +423,22 @@ class FrameWriter(FrameManager):
     def write(self, data, frame_id):
         frame = Frame(frame_id, data)
         if data == b'':
+            if abs(frame_id - self.last_frame_id) > self.expect_frame_cnt:
+                frame_id = self.last_frame_id + 1  # frame_id correction
             self.tbd_frame_ids.add(frame_id)
             self.error_frame_ids.append(frame_id)
             if len(self.tbd_frame_ids) > self.error_limit:
                 raise Exception(f"Too many error frames > {self.error_limit}")
-            if self.error_frame_ids and frame_id % 32 == 0:
-                self.resend_frame_callable(self.error_frame_ids)
-                self.error_frame_ids.clear()
         else:
             if frame_id in self.tbd_frame_ids:
                 self.tbd_frame_ids.remove(frame_id)
                 log.info(f"Remote resend frame_id={frame_id} frame received success")
             self.insert_frame(frame)
+        # request resend missing frames
+        if self.error_frame_ids and frame_id % self.num_iters_per_err == 0:
+            self.negot_resend_frame(self.filename, self.error_frame_ids)
+            self.error_frame_ids.clear()
+        self.last_frame_id = frame_id
 
     def flush(self):
         self.dst.write(self.read())
@@ -439,7 +490,9 @@ class SoundChannelBase:
         self.recv_event_queue = queue.Queue()  # recv event to ui
         self.send_event_queue = queue.Queue()  # send event to ui
         self.negot_event_queue = queue.Queue()  # send negotiate event to ui
-        self.frame_resend_queue = queue.Queue()  # send negotiate event to ui
+
+        self.multipart_file_negot_queue = queue.Queue()  # negotiate multipart file parts to be sent
+        self.filename_data_dict = {}  # temp save for resend whole
 
         self.sending_task_queue = TaggedQueue()
         self.data_task_queue = QueueWithTag(self.sending_task_queue, "data_task_queue")
@@ -474,8 +527,7 @@ class SoundChannelBase:
             th.start()
         for ready_evt in self.ready_events:
             ready_evt.wait()
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_START, quiet=True)
-        self.negot_task_queue.put(msg)
+        self.negot_message(NEGOT_START, "")
 
     def load_r_stream(self):
         return self.r_stream
@@ -510,34 +562,40 @@ class SoundChannelBase:
         recv_stream = interface.recorder()
         return AsyncReader(recv_stream, recv_stream.bufsize)
 
+    def queue_send_data(self, task_queue, data, filename=None):
+        if filename:
+            self.filename_data_dict[filename] = data
+            task_queue.put(WrappedData(filename, data))
+        else:
+            task_queue.put(WrappedData(VAL_MSG_NAME, data), high_prior=True)
+
     def send_message(self, msg):
         if isinstance(msg, str):
             self.queue_send_data(self.data_task_queue, msg)
 
     def send_file(self, file_path):
+        self.filename_data_dict.clear()
         filename = os.path.basename(file_path)
         if os.path.exists(file_path) and os.path.isfile(file_path):
             self.filename_to_path[filename] = file_path
             with open(file_path, "rb") as fd:
                 data = fd.read()
+            file_size = len(data)
             chunk_size = MULTI_FILE_SIZE_BYTES
             chunk_list = []
-            for i in range(0, len(data), chunk_size):
+            for i in range(0, file_size, chunk_size):
                 chunk = data[i:i + chunk_size]
                 chunk_list.append(chunk)
             if len(chunk_list) == 1:
                 self.queue_send_data(self.data_task_queue, data, filename=file_path)
             else:
                 tail_list = gen_multipart_tails(len(chunk_list))
-                self.negot_send_multipart_file(filename, len(chunk_list))
+                file_crc32 = framing._checksum_func(data)
+                part_crc32_list = [framing._checksum_func(_) for _ in chunk_list]
+                self.negot_send_multipart_file(filename, len(chunk_list), file_crc32, part_crc32_list)
                 for i, chunk in enumerate(chunk_list):
-                    self.queue_send_data(self.data_task_queue, chunk, filename=file_path + tail_list[i])
-
-    def queue_send_data(self, task_queue, data, filename=None):
-        if filename:
-            task_queue.put(WrappedData(filename, data))
-        else:
-            task_queue.put(WrappedData(VAL_MSG_NAME, data))
+                    part_name = filename + tail_list[i]
+                    self.multipart_file_negot_queue.put((file_path, file_size, i, part_name, chunk))
 
     def receive_data_signal(self, stream, config, dst=None, filename=None, stop_event: threading.Event = None):
         temp_dst = tempfile.TemporaryFile()
@@ -592,7 +650,8 @@ class SoundChannelBase:
             dst.seek(0)
             receiver.report()
 
-    def send_data_bytes(self, stream, config, bytes_data, stop_event: threading.Event, send_event_queue: queue.Queue):
+    def send_data_bytes(self, stream, config, bytes_data, stop_event: threading.Event, send_event_queue: queue.Queue,
+                        filename=None):
         t0 = time.time()
 
         sender = Sender(stream, config=config)
@@ -609,7 +668,7 @@ class SoundChannelBase:
         framer = Framer()
         if self.use_frame_id:
             bits_with_fid = framing.encode(compressed, framer=framer, cut_eof=self.cut_eof, use_fid=self.use_frame_id)
-            self.rfbi_bits = ResendFrameBitsIterator(bits_with_fid)
+            self.rfbi_bits = ResendFrameBitsIterator(bits_with_fid, filename)
             sender.modulate(bits=self.rfbi_bits, stop_event=stop_event)
             self.rfbi_bits = None
         else:
@@ -671,10 +730,6 @@ class SoundChannelBase:
         self.pause_loop_thread(idx)
         self.resume_loop_thread(idx)
 
-    def negot_remote_send_speed(self, kbps):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_SEND_SPEED + f"{SEPARATOR}{kbps}", quiet=True)
-        self.negot_task_queue.put(msg)
-
     def reload_recv_speed(self, kbps):
         if kbps == self.recv_cfg.modem_bps // 1000:
             return False
@@ -684,10 +739,6 @@ class SoundChannelBase:
         self.recv_cfg = create_config(kbps)
         self.resume_loop_thread(idx)
         return True
-
-    def negot_remote_recv_speed(self, kbps):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_RECV_SPEED + f"{SEPARATOR}{kbps}", quiet=True)
-        self.negot_task_queue.put(msg)
 
     def reload_send_speed(self, kbps):
         if kbps == self.send_cfg.modem_bps // 1000:
@@ -700,39 +751,51 @@ class SoundChannelBase:
         self.resume_loop_thread(idx)
         return True
 
-    def negot_remote_cancel_recv(self):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_RECV_STATE + f"{SEPARATOR}{STATE_CANCEL}", quiet=True)
+    def negot_message(self, negot_type, negot_info):
+        msg = WrappedData(VAL_MSG_NAME, negot_type + SEP + negot_info, quiet=True)
         self.negot_task_queue.put(msg)
+
+    def negot_remote_recv_speed(self, kbps):
+        self.negot_message(NEGOT_RECV_SPEED, f"{kbps}")
+
+    def negot_remote_send_speed(self, kbps):
+        self.negot_message(NEGOT_SEND_SPEED, f"{kbps}")
+
+    def negot_remote_cancel_recv(self):
+        self.negot_message(NEGOT_RECV_STATE, f"{STATE_CANCEL}")
 
     def negot_remote_cancel_send(self):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_SEND_STATE + f"{SEPARATOR}{STATE_CANCEL}", quiet=True)
-        self.negot_task_queue.put(msg)
+        self.negot_message(NEGOT_SEND_STATE, f"{STATE_CANCEL}")
 
     def negot_local_recv_fail(self):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_SEND_STATE + f"{SEPARATOR}{STATE_FAIL}", quiet=True)
-        self.negot_task_queue.put(msg)
+        self.negot_message(NEGOT_SEND_STATE, f"{STATE_FAIL}")
 
-    def negot_resend_frame(self, frame_id_list):
+    def negot_resend_frame(self, filename, frame_id_list):
+        filename = UNKNOWN if filename is None else filename
         frame_ids_str = ','.join([str(_) for _ in frame_id_list])
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_RESEND_FRAME + f"{SEPARATOR}{frame_ids_str}", quiet=True)
-        self.negot_task_queue.put(msg)
+        self.negot_message(NEGOT_RESEND_FRAME, f"{filename}{SEP}{frame_ids_str}")
 
     def negot_resend_whole(self, filename):
-        msg = WrappedData(VAL_MSG_NAME, NEGOT_RESEND_WHOLE + f"{SEPARATOR}{filename}", quiet=True)
-        self.negot_task_queue.put(msg)
+        self.negot_message(NEGOT_RESEND_WHOLE, f"{filename}")
 
-    def negot_send_multipart_file(self, filename, multipart_size):
-        msg = WrappedData(VAL_MSG_NAME,
-                          NEGOT_SEND_MULTIPART_FILE + f"{SEPARATOR}{filename}{SEPARATOR}{multipart_size}",
-                          quiet=True)
-        self.negot_task_queue.put(msg)
+    def negot_send_multipart_file(self, filename, multipart_size, file_crc32, part_crc32_list):
+        part_crc32_str = ','.join([str(_) for _ in part_crc32_list])
+        info = f"{filename}{SEP}{multipart_size}{SEP}{file_crc32}{SEP}{part_crc32_str}"
+        self.negot_message(NEGOT_SEND_MULTIPART_FILE, info)
+
+    def negot_recv_multipart_file(self, filename, needed_indexes):
+        needed_indexes_str = ','.join([str(_) for _ in needed_indexes])
+        info = f"{filename}{SEP}{needed_indexes_str}"
+        self.negot_message(NEGOT_RECV_MULTIPART_FILE, info)
 
     def check_negot_msg(self, msg):
         if NEGOT_TAG in msg:
             log.debug("Negotiate msg: %s" % msg)
+            print("Negotiate msg: %s" % msg)
+
         if msg.startswith(NEGOT_SEND_SPEED):
             try:
-                kbps = int(msg.split(SEPARATOR)[-1])
+                kbps = int(msg.split(SEP)[-1])
                 self.notify_event_queue.put(Event(Evt.NOTIFY_NEGOT, TYPE_SEND, o1=kbps))
                 if self.reload_send_speed(kbps):
                     self.notify_event_queue.put(
@@ -741,7 +804,7 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV_SPEED):
             try:
-                kbps = int(msg.split(SEPARATOR)[-1])
+                kbps = int(msg.split(SEP)[-1])
                 self.notify_event_queue.put(Event(Evt.NOTIFY_NEGOT, TYPE_RECV, o1=kbps))
                 if self.reload_recv_speed(kbps):
                     self.notify_event_queue.put(
@@ -750,7 +813,7 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RECV_STATE):
             try:
-                state = msg.split(SEPARATOR)[-1]
+                state = msg.split(SEP)[-1]
                 idx = 0  # listen thread id
                 if state == STATE_CANCEL:
                     self.pause_loop_thread(idx)
@@ -760,7 +823,7 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_SEND_STATE):
             try:
-                state = msg.split(SEPARATOR)[-1]
+                state = msg.split(SEP)[-1]
                 idx = 1  # send thread id
                 if state == STATE_FAIL:
                     self.pause_loop_thread(idx)
@@ -774,25 +837,53 @@ class SoundChannelBase:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_FRAME):
             try:
-                frame_ids_str = msg.split(SEPARATOR)[-1]
-                frame_ids = [int(_) for _ in frame_ids_str.split(",")]
-                if self.rfbi_bits is not None:
+                filename = msg.split(SEP)[1]
+                frame_ids_str = msg.split(SEP)[-1]
+                frame_ids = [int(_) for _ in frame_ids_str.split(",") if _]
+                if self.rfbi_bits is not None and self.rfbi_bits.filename == filename:
                     for frame_id in frame_ids:
                         self.rfbi_bits.arrange_resend_frame(frame_id)
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_WHOLE):
             try:
-                filename = msg.split(SEPARATOR)[-1]
-                self.data_task_queue.put(filename)
+                filename = msg.split(SEP)[-1]
+                data = self.filename_data_dict.get(filename)
+                if data is not None:
+                    self.queue_send_data(self.data_task_queue, data, filename=filename)
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_SEND_MULTIPART_FILE):
             try:
-                filename = msg.split(SEPARATOR)[1]
-                multipart_size = int(msg.split(SEPARATOR)[2])
+                filename = msg.split(SEP)[1]
+                multipart_size = int(msg.split(SEP)[2])
+                file_crc32 = int(msg.split(SEP)[3])
+                part_crc32_list = [int(_) for _ in msg.split(SEP)[4].split(",") if _]
                 tails = gen_multipart_tails(multipart_size)
-                self.merge_files_record[filename] = {f"{filename}{_}": False for _ in tails}
+                part_name_list = [f"{filename}{_}" for _ in tails]
+                needed_indexes = check_local_existing_file(filename, file_crc32, part_name_list, part_crc32_list)
+                if needed_indexes:
+                    self.merge_files_record[filename] = {_: True for _ in part_name_list}
+                    for idx in needed_indexes:
+                        part_name = part_name_list[idx]
+                        self.merge_files_record[filename][part_name] = False
+                self.negot_recv_multipart_file(filename, needed_indexes)
+            except:
+                traceback.print_exc()
+        elif msg.startswith(NEGOT_RECV_MULTIPART_FILE):
+            try:
+                filename = msg.split(SEP)[1]
+                needed_indexes = [int(_) for _ in msg.split(SEP)[2].split(",") if _]
+                checked = False
+                while not self.multipart_file_negot_queue.empty():
+                    (file_path, file_size, i, part_name, chunk) = self.multipart_file_negot_queue.get()
+                    if i in needed_indexes and part_name == filename + get_multipart_tail(i):
+                        self.queue_send_data(self.data_task_queue, chunk, filename=part_name)
+                    if not checked and len(needed_indexes) == 0:
+                        checked = True
+                        self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, file_path, o1=file_size))
+                        self.send_event_queue.put(Event(Evt.SEND_FILE_START, file_path, file_size, 0.1))
+                        self.send_event_queue.put(Event(Evt.SEND_FINISH, ""))
             except:
                 traceback.print_exc()
 
@@ -816,7 +907,10 @@ class SoundChannelBase:
                         send_time = config.silence_start + config.silence_stop + len(bytes_data) * 8 / config.modem_bps
                         send_event_queue.put(
                             Event(Evt.SEND_FILE_START, wrapped_data.get_name(), wrapped_data.get_size(), send_time))
-                        self.send_data_bytes(stream, config, bytes_data, stop_event, send_event_queue)
+
+                        filename = os.path.basename(file_path)
+                        self.send_data_bytes(stream, config, bytes_data, stop_event, send_event_queue,
+                                             filename=filename)
             except queue.Empty:
                 # 队列为空，继续循环
                 continue
@@ -844,18 +938,12 @@ class SoundChannelBase:
                     self.check_negot_msg(msg)
                 else:
                     self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, None))
-
-                    folder = os.path.join(CWD, "received")
-                    if not os.path.exists(folder):
-                        os.mkdir(folder)
-
                     filename = os.path.basename(handshake.get(KEY_NAME))
-                    send_time = config.silence_start + config.silence_stop + handshake.get(
-                        KEY_SIZE) * 8 / config.modem_bps
-                    listen_event_queue.put(
-                        Event(Evt.RECV_FILE_START, filename, handshake.get(KEY_SIZE), send_time))
+                    size_bytes = handshake.get(KEY_SIZE)
+                    send_time = config.silence_start + config.silence_stop + size_bytes * 8 / config.modem_bps
+                    listen_event_queue.put(Event(Evt.RECV_FILE_START, filename, size_bytes, send_time))
 
-                    f_path = os.path.join(folder, filename)
+                    f_path = os.path.join(RECEIVE_FOLDER, filename)
                     with open(f_path, "wb+") as temp_file:
                         recv_ok = self.receive_data_signal(stream, config, dst=temp_file, filename=filename,
                                                            stop_event=stop_event)
@@ -865,16 +953,18 @@ class SoundChannelBase:
                             tails_status = self.merge_files_record[origin_filename]
                             tails_status[filename] = True
                             tails_status_values = list(tails_status.values())
-                            log.info(f"Received multipart file: {sum(tails_status_values)}/{len(tails_status_values)}")
+                            log.info(f"Received multipart file {filename}, "
+                                     f"progress: {sum(tails_status_values)}/{len(tails_status_values)}")
                             if all(tails_status_values):
-                                f_path_list = [os.path.join(folder, _) for _ in tails_status]
-                                merge_files(f_path_list, os.path.join(folder, origin_filename))
+                                f_path_list = [os.path.join(RECEIVE_FOLDER, _) for _ in tails_status.keys()]
+                                merge_files(f_path_list, os.path.join(RECEIVE_FOLDER, origin_filename))
                         listen_event_queue.put(Event(Evt.RECV_FILE_FINISH, f_path))
                     else:
                         listen_event_queue.put(Event(Evt.FILE_FAIL, f_path))
                         if stream is self.r_stream and not stop_event.is_set():
                             self.negot_local_recv_fail()
                             if MULTI_FILE_SEP in filename:
+                                log.info(f"Request resend multipart file: {filename}")
                                 self.negot_resend_whole(filename)
 
     def stop(self):
