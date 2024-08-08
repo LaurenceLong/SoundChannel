@@ -991,11 +991,11 @@ class SoundChannelBase:
                     self.send_handshake(stream, config, wrapped_data, stop_event, send_event_queue)
                     if wrapped_data.get_name() != VAL_MSG_NAME:
                         file_path = wrapped_data.get_name()
-                        data_bytes_size = wrapped_data.get_size()
-                        self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, file_path, o1=data_bytes_size))
+                        bytes_size = wrapped_data.get_size()
+                        self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, file_path, o1=bytes_size))
 
-                        send_time = cal_send_time(config, data_bytes_size)
-                        send_event_queue.put(Event(Evt.SEND_FILE_START, file_path, data_bytes_size, send_time))
+                        send_time = cal_send_time(config, bytes_size)
+                        send_event_queue.put(Event(Evt.SEND_FILE_START, file_path, bytes_size, send_time))
 
                         filename = os.path.basename(file_path)
                         bytes_data = wrapped_data.get_data()
@@ -1030,7 +1030,7 @@ class SoundChannelBase:
                     self.notify_event_queue.put(Event(Evt.NOTIFY_FILE, None))
                     filename = os.path.basename(handshake.get(KEY_NAME))
                     bytes_size = handshake.get(KEY_SIZE)
-                    send_time = config.silence_start + config.silence_stop + bytes_size * 8 / config.modem_bps
+                    send_time = cal_send_time(config, bytes_size)
                     listen_event_queue.put(Event(Evt.RECV_FILE_START, filename, bytes_size, send_time))
 
                     f_path = os.path.join(RECEIVE_FOLDER, filename)

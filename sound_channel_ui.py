@@ -17,7 +17,7 @@ from b64_encoded_files import icon_base64
 from sound_channel import SoundChannelBase, Event, Evt
 
 # 版本号
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 channel_base = SoundChannelBase()
 
 
@@ -368,8 +368,8 @@ class ChatInterface(tk.Tk):
                     self.dropdown2.set(sound_channel.RATES_IDX_TO_DESC.get(int(kbps)))
 
     def register_hotkey(self):
-        keyboard.add_hotkey('ctrl+alt+c', self.hotkey_direct_copy)
-        keyboard.add_hotkey('ctrl+alt+v', self.hotkey_direct_paste)
+        keyboard.add_hotkey('alt+z', self.hotkey_direct_copy)
+        keyboard.add_hotkey('alt+x', self.hotkey_direct_paste)
 
     def hotkey_direct_copy(self):
         children = [child for child in self.history_frame.winfo_children() if isinstance(child, MessageBlock)]
