@@ -10,7 +10,7 @@ from tkinter import PhotoImage
 from tkinter import filedialog, Menu
 from tkinter import ttk, messagebox
 
-import keyboard
+from pynput import keyboard
 
 import sound_channel
 from b64_encoded_files import icon_base64
@@ -23,14 +23,11 @@ channel_base = SoundChannelBase()
 
 def get_event(event_queue, timeout, attempts, expected_key=None):
     """尝试从事件队列中获取事件。
-
     Args:
         event_queue: 事件队列的基础通道。
         timeout (int): 获取事件的超时时间。
         attempts (int): 获取事件的尝试次数。
         expected_key: 如果提供，则只返回匹配的事件。
-
-
     Returns:
         Event: 获取到的事件，如果未获取到则返回None。
     """
@@ -333,8 +330,7 @@ class ChatInterface(tk.Tk):
         self.notify_monitor_thread.start()
 
         # 在单独的线程中注册热键
-        self.hotkey_thread = threading.Thread(target=self.register_hotkey, daemon=True)
-        self.hotkey_thread.start()
+        self.hotkey_listener = self.register_hotkey_listener()
 
     def on_dropdown1_select(self, event):
         desc = self.dropdown1.get()
@@ -367,17 +363,21 @@ class ChatInterface(tk.Tk):
                 else:
                     self.dropdown2.set(sound_channel.RATES_IDX_TO_DESC.get(int(kbps)))
 
-    def register_hotkey(self):
-        keyboard.add_hotkey('alt+z', self.hotkey_direct_copy)
-        keyboard.add_hotkey('alt+x', self.hotkey_direct_paste)
+    def register_hotkey_listener(self):
+        listener = keyboard.GlobalHotKeys({
+            '<alt>+z': self.hotkey_recv_to_clipboard,
+            '<alt>+x': self.hotkey_send_from_clipboard
+        })
+        listener.start()
+        return listener
 
-    def hotkey_direct_copy(self):
+    def hotkey_recv_to_clipboard(self):
         children = [child for child in self.history_frame.winfo_children() if isinstance(child, MessageBlock)]
         if children:
             self.clipboard_clear()
             self.clipboard_append(children[-1].message)
 
-    def hotkey_direct_paste(self):
+    def hotkey_send_from_clipboard(self):
         message = self.clipboard_get()
         channel_base.send_message(message)
         self.add_message_block(message)
@@ -464,6 +464,7 @@ class ChatInterface(tk.Tk):
         self.scroll_to_top()
 
     def destroy(self):
+        self.hotkey_listener.stop()
         # 在这里添加其他线程的销毁动作
         channel_base.stop()
         # 调用父类的 destroy 方法

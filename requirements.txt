@@ -1,4 +1,4 @@
-numpy~=2.0.0
+numpy
 pyaudio~=0.2.14
 reedsolo~=2.0.13
-keyboard~=0.13.5
+pynput
