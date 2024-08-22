@@ -157,7 +157,7 @@ class Receiver:
             (1.0 - sampler.freq) * 1e6
         )
 
-    def run(self, sampler, gain, output, cut_eof=False, raise_err=True, use_fid=False):
+    def run(self, sampler, gain, output, stop_event=None, cut_eof=False, raise_err=True, use_fid=False):
         log.debug('Receiving')
         symbols = dsp.Demux(sampler, omegas=self.omegas, Nsym=self.Nsym)
         self._prefix(symbols, gain=gain)
@@ -169,14 +169,16 @@ class Receiver:
         bitstream = itertools.chain.from_iterable(bitstream)
 
         if not use_fid:
-            for frame in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err,
-                                               use_fid=use_fid):
+            for frame in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+                if stop_event is not None and stop_event.is_set():
+                    raise StopIteration('Receiver stop iteration by stop_event')
                 output.write(frame)
                 self.output_size += len(frame)
         else:
-            for frame, frame_id in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err,
-                                                         use_fid=use_fid):
-                output.write(frame, frame_id)
+            for frame, fid in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+                if stop_event is not None and stop_event.is_set():
+                    raise StopIteration('Receiver stop iteration by stop_event')
+                output.write(frame, fid)
                 self.output_size += len(frame)
 
     def report(self):

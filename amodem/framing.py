@@ -108,6 +108,7 @@ class Framer:
     checksum = Checksum()
 
     EOF = b''
+    NULL_CHAR = b'\x04'
 
     def __init__(self):
         self.frame_id = 0
@@ -195,9 +196,9 @@ class Framer:
                 frame_id = self.frame_id
                 self.frame_id += 1
                 if not use_fid:
-                    yield b''
+                    yield self.NULL_CHAR
                 else:
-                    yield b'', frame_id
+                    yield self.NULL_CHAR, frame_id
 
 
 def _take_fmt(data, fmt):

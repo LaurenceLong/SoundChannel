@@ -74,6 +74,8 @@ INIT_RECV_kbps = 40
 FILE_UNIT_KB = 512
 MULTI_FILE_SIZE_BYTES = 1024 * FILE_UNIT_KB
 NEGOT_CFG = Configuration(Fs=32e3, Npoints=16, frequencies=Configuration.negotiate_frequencies)
+NEGOT_CFG.silence_start = 0.1
+NEGOT_CFG.silence_stop = 0.4
 
 
 class Evt(Enum):
@@ -379,8 +381,9 @@ class ResendFrameBitsIterator:
             self.resend_queue.put(frame_id)
 
     def arrange_resend_frames_from_id(self, frame_id):
+        log.info("Resend frames from id: %s" % frame_id)
         for fid in range(frame_id, max(self.id_to_frame_bits.keys()) + 1):
-            if fid in self.id_to_frame_bits:
+            if fid in self.id_to_frame_bits and len(self.id_to_frame_bits[fid]) >= framing.Framer.chunk_size:
                 self.resend_queue.put(fid)
 
 
@@ -394,20 +397,31 @@ class FrameManager:
     def __init__(self):
         self.frames_list = []  # 用于保持有序的frame id
         self.frames_dict = {}  # 用于快速查找frame内容
+        self.might_missed_frames = set()  # 用于存储可能丢失的frame id
+        self.max_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / (framing.Framer.block_size - 4))
 
     def is_continuous(self):
         return all(y - x == 1 for x, y in zip(self.frames_list, self.frames_list[1:]))
 
+    def add_missing_frame(self, frame_id):
+        if frame_id not in self.frames_dict and frame_id < self.max_frame_cnt:
+            self.might_missed_frames.add(frame_id)
+
     def get_missing_frames(self):
-        if not self.frames_list:
+        if not self.frames_list and not self.might_missed_frames:
             return []  # 如果列表为空，返回空列表
 
-        start = self.frames_list[0]
-        end = self.frames_list[-1]
+        start = self.frames_list[0] if self.frames_list else 0
+        max_missed = max(self.might_missed_frames) if self.might_missed_frames else -1
+        end = max(max_missed, self.last_frame_id)
         all_frames = set(range(start, end + 1))
         existing_frames = set(self.frames_list)
 
         return sorted(all_frames - existing_frames)
+
+    @property
+    def last_frame_id(self):
+        return self.frames_list[-1] if self.frames_list else -1
 
     @property
     def missing_frame_ids(self):
@@ -418,6 +432,8 @@ class FrameManager:
         if frame.frame_id in self.frames_dict:
             log.warning(f"Frame with id {frame.frame_id} already exists.")
             return
+        if frame.frame_id in self.might_missed_frames:
+            self.might_missed_frames.remove(frame.frame_id)
         # 找到应插入的位置
         index = self.find_insert_position(frame.frame_id)
         # 插入frame id到有序列表中
@@ -460,12 +476,10 @@ class FrameWriter(FrameManager):
 
         frame_bytes_size = framing.Framer.chunk_size
         self.frame_per_second = (modem_bps / 8) // frame_bytes_size
-        self.latent_time_secs = cal_send_time(NEGOT_CFG, 1) + 1
-        self.expect_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / frame_bytes_size)
-        self.error_limit = int(self.frame_per_second * self.latent_time_secs)
         self.num_frames_per_check = max(1, self.frame_per_second)
+        self.latent_time_secs = cal_send_time(NEGOT_CFG, 1) + 2  # must > latent(negot + check)
+        self.error_limit = math.ceil(self.frame_per_second * self.latent_time_secs)
         self.num_sequential_missing = max(2, int(round(self.num_frames_per_check / 4)))
-        self.last_frame_id = -1
 
     def get_dst(self):
         return self.dst
@@ -477,10 +491,12 @@ class FrameWriter(FrameManager):
         return True
 
     def write(self, data, frame_id):
-        if data == b'':
-            if abs(frame_id - self.last_frame_id) > self.expect_frame_cnt:
+        if data == framing.Framer.NULL_CHAR:
+            if abs(frame_id) >= self.max_frame_cnt:
                 frame_id = self.last_frame_id + 1  # frame_id correction
-            if self.paused_error_frame_id is not None:
+            if self.paused_error_frame_id is None:
+                self.add_missing_frame(frame_id)
+            else:
                 self.error_cnt_after_paused += 1
             if len(self.missing_frame_ids) > self.error_limit or self.error_cnt_after_paused > self.error_limit:
                 raise Exception(f"Too many error frames > {self.error_limit}")
@@ -493,7 +509,7 @@ class FrameWriter(FrameManager):
             frame = Frame(frame_id, data)
             self.insert_frame(frame)
         # request resend missing frames
-        if frame_id % self.num_frames_per_check == 0:
+        if frame_id % self.num_frames_per_check == 0 and self.paused_error_frame_id is None:
             missing_frame_ids = self.get_missing_frames()
             if missing_frame_ids:
                 index = find_increasing_sequence(missing_frame_ids, n=self.num_sequential_missing)
@@ -507,12 +523,11 @@ class FrameWriter(FrameManager):
                         self.paused_error_frame_id = index
                         break
                 self.negot_resend_frame(self.filename, arrange)
-        if frame_id > self.last_frame_id:
-            self.last_frame_id = frame_id
 
     def flush(self):
-        self.dst.write(self.read())
-        self.dst.flush()
+        if self.is_continuous():
+            self.dst.write(self.read())
+            self.dst.flush()
 
     def read(self):
         data = b''
@@ -598,7 +613,7 @@ class SoundChannelBase:
             th.start()
         for ready_evt in self.ready_events:
             ready_evt.wait()
-        self.negot_message(NEGOT_START, "")
+        self.negot_start()
 
     def load_r_stream(self):
         return self.r_stream
@@ -673,8 +688,7 @@ class SoundChannelBase:
         if self.use_frame_id:
             fw = FrameWriter(filename, temp_dst, config.modem_bps, self.negot_resend_frame)
             ret_fw = self.receive_data_signal_compressed(stream, config, dst=fw, stop_event=stop_event)
-            if ret_fw:
-                fw.validation()
+            if ret_fw and fw.validation():
                 fw.flush()
                 compressed_file = fw.get_dst()
             else:
@@ -707,10 +721,10 @@ class SoundChannelBase:
 
             sampler = sampling.Sampler(signal, sampling.defaultInterpolator, freq=freq)
             if not isinstance(dst, FrameWriter):
-                receiver.run(sampler, gain=1.0 / amplitude, output=dst, cut_eof=self.cut_eof, raise_err=False)
+                receiver.run(sampler, gain=1.0 / amplitude, output=dst, stop_event=stop_event, cut_eof=self.cut_eof)
             else:
-                receiver.run(sampler, gain=1.0 / amplitude, output=dst, cut_eof=self.cut_eof, raise_err=False,
-                             use_fid=True)
+                receiver.run(sampler, gain=1.0 / amplitude, output=dst, stop_event=stop_event, cut_eof=self.cut_eof,
+                             raise_err=False, use_fid=True)
             return dst
         except BaseException:  # pylint: disable=broad-except
             traceback.print_exc()
@@ -789,10 +803,11 @@ class SoundChannelBase:
     def resume_loop_thread(self, idx):
         self.ready_events[idx].set()
 
-    def cancel_data_sending(self):
+    def cancel_data_sending(self, sleep=4):
         log.info("Cancel data sending")
         idx = 1  # send thread id
         self.pause_loop_thread(idx)
+        time.sleep(sleep)
         self.resume_loop_thread(idx)
 
     def cancel_data_receiving(self):
@@ -822,9 +837,12 @@ class SoundChannelBase:
         self.resume_loop_thread(idx)
         return True
 
-    def negot_message(self, negot_type, negot_info):
-        msg = WrappedData(VAL_MSG_NAME, negot_type + SEP + negot_info, quiet=True)
+    def negot_message(self, negot_type, negot_info, quiet=True):
+        msg = WrappedData(VAL_MSG_NAME, negot_type + SEP + negot_info, quiet=quiet)
         self.negot_task_queue.put(msg)
+
+    def negot_start(self):
+        self.negot_message(NEGOT_START, "")
 
     def negot_remote_recv_speed(self, kbps):
         self.negot_message(NEGOT_RECV_SPEED, f"{kbps}")
@@ -864,7 +882,12 @@ class SoundChannelBase:
             log.debug("Negotiate msg: %s" % msg)
             print("Negotiate msg: %s" % msg)
 
-        if msg.startswith(NEGOT_SEND_SPEED):
+        if msg.startswith(NEGOT_START):
+            try:
+                self.send_message(f"Hello, I received your handshake~")
+            except:
+                traceback.print_exc()
+        elif msg.startswith(NEGOT_SEND_SPEED):
             try:
                 items = msg.split(SEP)
                 kbps = int(items[-1])
@@ -908,8 +931,8 @@ class SoundChannelBase:
                         self.resume_loop_thread(idx)
                     elif state == STATE_CANCEL:
                         self.pause_loop_thread(idx)
-                        self.resume_loop_thread(idx)
                         self.send_event_queue.put(Event(Evt.FILE_CANCEL, ""))
+                        self.resume_loop_thread(idx)
             except:
                 traceback.print_exc()
         elif msg.startswith(NEGOT_RESEND_FRAME):
@@ -1001,6 +1024,7 @@ class SoundChannelBase:
                         bytes_data = wrapped_data.get_data()
                         self.send_data_bytes(stream, config, bytes_data, stop_event, send_event_queue,
                                              filename=filename)
+                        time.sleep(2)
             except queue.Empty:
                 # 队列为空，继续循环
                 continue
@@ -1063,7 +1087,10 @@ class SoundChannelBase:
             event.set()
         for stream in self.opened_streams:
             if stream:
-                stream.close()
+                try:
+                    stream.close()
+                except:
+                    pass
 
 
 def test_send_msg():

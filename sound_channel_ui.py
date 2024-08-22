@@ -17,7 +17,7 @@ from b64_encoded_files import icon_base64
 from sound_channel import SoundChannelBase, Event, Evt
 
 # 版本号
-VERSION = "0.3.1"
+VERSION = "0.3.3"
 channel_base = SoundChannelBase()
 
 
@@ -194,9 +194,11 @@ class FileBlock(tk.Frame):
                 if event.key == Evt.SEND_FINISH:
                     progress_val = 100
                     self.is_done = True
+                    self.cancel_button.config(state=tk.DISABLED)
                 elif event.key == Evt.RECV_FILE_FINISH:
                     progress_val = 100
                     self.is_done = True
+                    self.cancel_button.config(state=tk.DISABLED)
                     self.file_path = event.value
                 elif event.key == Evt.FILE_FAIL:
                     self.set_transfer_failed()
@@ -451,8 +453,7 @@ class ChatInterface(tk.Tk):
             self.input_field.config(bg='lightblue')
 
     def handshake(self):
-        self.add_message_block("Handshake initiated.")
-        self.scroll_to_bottom()
+        channel_base.negot_start()
 
     def confirm_clear_history(self):
         if messagebox.askyesno("Confirm", "Are you sure clear history"):
