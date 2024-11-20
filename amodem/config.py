@@ -22,6 +22,10 @@ class Configuration:
     skip_start = 0.1
     timeout = 60.0
 
+    # audio device index
+    input_device_index = None
+    output_device_index = None
+
     def __init__(self, **kwargs):
         self.__dict__.update(**kwargs)
 

@@ -144,6 +144,10 @@ class Stream:
                 'output': write,
                 'frames_per_buffer': pa.paFramesPerBufferUnspecified,
             }
+            if config.input_device_index is not None:
+                arguments['input_device_index'] = config.input_device_index
+            if config.output_device_index is not None:
+                arguments['output_device_index'] = config.output_device_index
             self.stream = self.interface.win_pyaudio.open(**arguments)
             self.interface.streams.append(self)
             self.stream.start_stream()

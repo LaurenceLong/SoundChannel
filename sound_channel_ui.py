@@ -14,11 +14,11 @@ from pynput import keyboard
 
 import sound_channel
 from b64_encoded_files import icon_base64
-from sound_channel import SoundChannelBase, Event, Evt
+from sound_channel import Event, EvtKeys
 
 # 版本号
-VERSION = "0.3.3"
-channel_base = SoundChannelBase()
+VERSION = "0.3.4"
+channel_base = sound_channel.SoundChannelBase()
 
 
 def get_event(event_queue, timeout, attempts, expected_key=None):
@@ -132,9 +132,9 @@ class FileBlock(tk.Frame):
             return
         # 尝试获取 SEND_FILE_START 事件
         event: Event = get_event(event_queue, timeout=1, attempts=10,
-                                 expected_key=[Evt.SEND_FILE_START, Evt.RECV_FILE_START])
+                                 expected_key=[EvtKeys.SEND_FILE_START, EvtKeys.RECV_FILE_START])
         if event:
-            if event.key == Evt.RECV_FILE_START:
+            if event.key == EvtKeys.RECV_FILE_START:
                 self.file_name = event.value
                 self.file_label.config(text=self.desc + self.file_name)
                 self.file_size = event.o1
@@ -191,19 +191,19 @@ class FileBlock(tk.Frame):
                     event: Event = event_queue.get(timeout=duration)
                 else:
                     event: Event = event_queue.get()
-                if event.key == Evt.SEND_FINISH:
+                if event.key == EvtKeys.SEND_FINISH:
                     progress_val = 100
                     self.is_done = True
                     self.cancel_button.config(state=tk.DISABLED)
-                elif event.key == Evt.RECV_FILE_FINISH:
+                elif event.key == EvtKeys.RECV_FILE_FINISH:
                     progress_val = 100
                     self.is_done = True
                     self.cancel_button.config(state=tk.DISABLED)
                     self.file_path = event.value
-                elif event.key == Evt.FILE_FAIL:
+                elif event.key == EvtKeys.FILE_FAIL:
                     self.set_transfer_failed()
                     break
-                elif event.key == Evt.FILE_CANCEL:
+                elif event.key == EvtKeys.FILE_CANCEL:
                     self.cancel_transfer(inform_remote=False)
                     break
             except queue.Empty:
@@ -294,7 +294,12 @@ class ChatInterface(tk.Tk):
         self.clear_button.pack(side=tk.LEFT, padx=(0, 5))
 
         self.file_button = tk.Button(top_frame, text="SelectFile", command=self.select_file)
-        self.file_button.pack(side=tk.LEFT)
+        self.file_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.selected_input = tk.StringVar()
+        self.selected_output = tk.StringVar()
+        self.setting_button = tk.Button(top_frame, text="AudioSet", command=self.show_device_dialog)
+        self.setting_button.pack(side=tk.LEFT)
 
         main_frame = tk.Frame(self)
         main_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
@@ -349,15 +354,15 @@ class ChatInterface(tk.Tk):
     def notify_monitor(self):
         while True:
             event: Event = channel_base.notify_event_queue.get()
-            if event.key == Evt.NOTIFY_MSG:
+            if event.key == EvtKeys.NOTIFY_MSG:
                 self.add_message_block(event.value, local=False)
                 self.scroll_to_bottom()
-            elif event.key == Evt.NOTIFY_FILE:
+            elif event.key == EvtKeys.NOTIFY_FILE:
                 filename = event.value
                 file_size = event.o1
                 self.add_file_block(filename, file_size=file_size)
                 self.scroll_to_bottom()
-            elif event.key == Evt.NOTIFY_NEGOT:
+            elif event.key == EvtKeys.NOTIFY_NEGOT:
                 negot_type = event.value
                 kbps = event.o1
                 if negot_type == sound_channel.TYPE_SEND:
@@ -432,6 +437,114 @@ class ChatInterface(tk.Tk):
             self.input_field.delete("1.0", tk.END)
             self.input_field.insert("1.0", f"Selected file: {file_name}")
             self.input_field.config(bg='lightblue')
+
+    def show_device_dialog(self):
+        # 创建弹窗
+        dialog = tk.Toplevel(self)
+        dialog.title("音频设备选择")
+        dialog.geometry("400x400")
+
+        # 创建一个容器框架来包含Canvas和按钮
+        container_frame = ttk.Frame(dialog)
+        container_frame.pack(fill="both", expand=True)
+
+        # 创建Canvas框架来容纳设备列表
+        canvas_frame = ttk.Frame(container_frame)
+        canvas_frame.pack(fill="both", expand=True)
+
+        # 创建主Canvas和滚动条
+        main_canvas = tk.Canvas(canvas_frame)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=main_canvas.yview)
+
+        # 创建一个框架来包含所有内容
+        content_frame = ttk.Frame(main_canvas)
+
+        # 配置Canvas
+        main_canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 创建两个LabelFrame分别用于输入和输出设备
+        input_frame = ttk.LabelFrame(content_frame, text="输入设备（麦克风）", padding=10)
+        input_frame.pack(fill="x", padx=10, pady=5)
+
+        output_frame = ttk.LabelFrame(content_frame, text="输出设备（扬声器）", padding=10)
+        output_frame.pack(fill="x", padx=10, pady=5)
+
+        # 添加输入设备选项
+        input_devices, output_devices = sound_channel.get_audio_devices()
+        for device in input_devices:
+            radio = ttk.Radiobutton(
+                input_frame,
+                text=f"{device['name']}\n采样率: {device['sample_rate']}Hz, 通道数: {device['channels']}" + (
+                    ", 默认设备" if device['default'] else ""),
+                variable=self.selected_input,
+                value=str(device['index'])
+            )
+            radio.pack(anchor='w', pady=2)
+            if device['index'] == sound_channel.device_indexes[0]:
+                self.selected_input.set(str(device['index']))
+
+        # 添加输出设备选项
+        for device in output_devices:
+            radio = ttk.Radiobutton(
+                output_frame,
+                text=f"{device['name']}\n采样率: {device['sample_rate']}Hz, 通道数: {device['channels']}" + (
+                    ", 默认设备" if device['default'] else ""),
+                variable=self.selected_output,
+                value=str(device['index'])
+            )
+            radio.pack(anchor='w', pady=2)
+            if device['index'] == sound_channel.device_indexes[1]:
+                self.selected_output.set(str(device['index']))
+
+        # 放置滚动条和Canvas
+        scrollbar.pack(side="right", fill="y")
+        main_canvas.pack(side="left", fill="both", expand=True)
+
+        # 在Canvas中创建窗口
+        canvas_frame = main_canvas.create_window((0, 0), window=content_frame, anchor="nw")
+
+        # 添加确认和取消按钮（在容器框架底部）
+        button_frame = ttk.Frame(container_frame)
+        button_frame.pack(fill="x", padx=10, pady=5, side="bottom")
+
+        ttk.Button(
+            button_frame,
+            text="确认",
+            command=lambda: self.on_dialog_confirm(dialog)
+        ).pack(side="right", padx=5)
+
+        ttk.Button(
+            button_frame,
+            text="取消",
+            command=dialog.destroy
+        ).pack(side="right", padx=5)
+
+        # 配置Canvas滚动区域
+        def configure_scroll_region(event):
+            main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+
+        def configure_canvas_width(event):
+            main_canvas.itemconfig(canvas_frame, width=event.width)
+
+        content_frame.bind("<Configure>", configure_scroll_region)
+        main_canvas.bind("<Configure>", configure_canvas_width)
+
+        # 绑定鼠标滚轮
+        def on_mousewheel(event):
+            main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        main_canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        # 设置弹窗为模态
+        dialog.transient(self)
+        dialog.grab_set()
+        self.wait_window(dialog)
+
+    def on_dialog_confirm(self, dialog):
+        desc = self.dropdown1.get()
+        kbps = sound_channel.RATES_DESC_TO_IDX[desc]
+        channel_base.reload_send_speed(kbps, int(self.selected_input.get()), int(self.selected_output.get()))
+        dialog.destroy()
 
     def reset_input_field(self):
         self.selected_file = None
