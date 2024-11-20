@@ -257,6 +257,150 @@ class FileBlock(tk.Frame):
             return f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
 
 
+class AudioSetDialog(tk.Toplevel):
+    def __init__(self, master, kbps):
+        self.master = master
+        self.kbps = kbps
+        self.devices_released = False
+        super().__init__()
+
+        self.title("音频设备选择")
+        self.geometry("400x400")
+
+        self.selected_input = tk.StringVar()
+        self.selected_output = tk.StringVar()
+
+        # 创建一个容器框架来包含Canvas和按钮
+        container_frame = ttk.Frame(self)
+        container_frame.pack(fill="both", expand=True)
+
+        # 创建Canvas框架来容纳设备列表
+        canvas_frame = ttk.Frame(container_frame)
+        canvas_frame.pack(fill="both", expand=True)
+
+        # 创建主Canvas和滚动条
+        main_canvas = tk.Canvas(canvas_frame)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=main_canvas.yview)
+
+        # 创建一个框架来包含所有内容
+        content_frame = ttk.Frame(main_canvas)
+
+        # 配置Canvas
+        main_canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 创建两个LabelFrame分别用于输入和输出设备
+        self.input_frame = ttk.LabelFrame(content_frame, text="输入设备（麦克风）", padding=10)
+        self.input_frame.pack(fill="x", padx=10, pady=5)
+
+        self.output_frame = ttk.LabelFrame(content_frame, text="输出设备（扬声器）", padding=10)
+        self.output_frame.pack(fill="x", padx=10, pady=5)
+
+        self.refresh_dialog()
+        # 放置滚动条和Canvas
+        scrollbar.pack(side="right", fill="y")
+        main_canvas.pack(side="left", fill="both", expand=True)
+
+        # 在Canvas中创建窗口
+        canvas_frame = main_canvas.create_window((0, 0), window=content_frame, anchor="nw")
+
+        # 添加确认和取消按钮（在容器框架底部）
+        button_frame = ttk.Frame(container_frame)
+        button_frame.pack(fill="x", padx=10, pady=5, side="bottom")
+
+        ttk.Button(
+            button_frame,
+            text="确认",
+            command=self.on_dialog_confirm
+        ).pack(side="right", padx=5)
+
+        ttk.Button(
+            button_frame,
+            text="取消",
+            command=self.destroy
+        ).pack(side="right", padx=5)
+
+        ttk.Button(
+            button_frame,
+            text="刷新",
+            command=self.on_dialog_refresh
+        ).pack(side="left", padx=5)
+
+        # 配置Canvas滚动区域
+        def configure_scroll_region(event):
+            main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+
+        def configure_canvas_width(event):
+            main_canvas.itemconfig(canvas_frame, width=event.width)
+
+        content_frame.bind("<Configure>", configure_scroll_region)
+        main_canvas.bind("<Configure>", configure_canvas_width)
+
+        # 绑定鼠标滚轮
+        def on_mousewheel(event):
+            main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        main_canvas.bind_all("<MouseWheel>", on_mousewheel)
+        # 设置弹窗为模态
+        self.transient(self.master)
+        self.grab_set()
+
+    def refresh_dialog(self):
+        # 清除现有的设备列表
+        print(sound_channel.device_indexes)
+        for widget in self.input_frame.winfo_children():
+            widget.destroy()
+        for widget in self.output_frame.winfo_children():
+            widget.destroy()
+        # 添加输入设备选项
+        input_devices, output_devices = sound_channel.get_audio_devices()
+        # sound_channel.print_audio_devices()
+        for device in input_devices:
+            radio = ttk.Radiobutton(
+                self.input_frame,
+                text=f"{device['name']}\n采样率: {device['sample_rate']}Hz, 通道数: {device['channels']}" + (
+                    ", 默认设备" if device['default'] else ""),
+                variable=self.selected_input,
+                value=str(device['index'])
+            )
+            radio.pack(anchor='w', pady=2)
+            if device['index'] == sound_channel.device_indexes[0]:
+                self.selected_input.set(str(device['index']))
+            elif sound_channel.device_indexes[0] is None and device['default']:
+                sound_channel.device_indexes[0] = device['index']
+                self.selected_input.set(str(device['index']))
+
+        # 添加输出设备选项
+        for device in output_devices:
+            radio = ttk.Radiobutton(
+                self.output_frame,
+                text=f"{device['name']}\n采样率: {device['sample_rate']}Hz, 通道数: {device['channels']}" + (
+                    ", 默认设备" if device['default'] else ""),
+                variable=self.selected_output,
+                value=str(device['index'])
+            )
+            radio.pack(anchor='w', pady=2)
+            if device['index'] == sound_channel.device_indexes[1]:
+                self.selected_output.set(str(device['index']))
+            elif sound_channel.device_indexes[1] is None and device['default']:
+                sound_channel.device_indexes[1] = device['index']
+                self.selected_output.set(str(device['index']))
+
+    def on_dialog_confirm(self):
+        channel_base.reload_send_speed(self.kbps, int(self.selected_input.get()), int(self.selected_output.get()))
+        self.devices_released = False
+        self.destroy()
+
+    def on_dialog_refresh(self):
+        channel_base.release_all_devices()
+        self.devices_released = True
+        self.refresh_dialog()
+
+    def destroy(self):
+        if self.devices_released:
+            channel_base.reload_default_devices()
+        super().destroy()
+
+
 class ChatInterface(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -296,8 +440,6 @@ class ChatInterface(tk.Tk):
         self.file_button = tk.Button(top_frame, text="SelectFile", command=self.select_file)
         self.file_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        self.selected_input = tk.StringVar()
-        self.selected_output = tk.StringVar()
         self.setting_button = tk.Button(top_frame, text="AudioSet", command=self.show_device_dialog)
         self.setting_button.pack(side=tk.LEFT)
 
@@ -320,17 +462,17 @@ class ChatInterface(tk.Tk):
         self.history_frame.bind("<Configure>", self.on_frame_configure)
         self.history_canvas.bind("<Configure>", self.on_canvas_configure)
 
-        input_frame = tk.Frame(main_frame)
-        input_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-        input_frame.grid_columnconfigure(0, weight=1)
+        self.input_frame = tk.Frame(main_frame)
+        self.input_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        self.input_frame.grid_columnconfigure(0, weight=1)
 
-        self.input_field = tk.Text(input_frame, height=3, wrap=tk.WORD)
+        self.input_field = tk.Text(self.input_frame, height=3, wrap=tk.WORD)
         self.input_field.grid(row=0, column=0, sticky="ew", padx=(0, 5))
         self.input_field.bind("<KeyPress>", self.on_input_key_press)
         self.input_field.bind("<KeyRelease>", self.on_input_key_release)
         self.input_field.bind("<Control-Return>", self.send_with_shortcut)
 
-        self.send_button = tk.Button(input_frame, text="Send\n(Ctrl + Enter)", command=self.send_f)
+        self.send_button = tk.Button(self.input_frame, text="Send\n(Ctrl + Enter)", command=self.send_f)
         self.send_button.grid(row=0, column=1, sticky="ns")
 
         self.notify_monitor_thread = threading.Thread(target=self.notify_monitor, daemon=True)
@@ -439,112 +581,10 @@ class ChatInterface(tk.Tk):
             self.input_field.config(bg='lightblue')
 
     def show_device_dialog(self):
-        # 创建弹窗
-        dialog = tk.Toplevel(self)
-        dialog.title("音频设备选择")
-        dialog.geometry("400x400")
-
-        # 创建一个容器框架来包含Canvas和按钮
-        container_frame = ttk.Frame(dialog)
-        container_frame.pack(fill="both", expand=True)
-
-        # 创建Canvas框架来容纳设备列表
-        canvas_frame = ttk.Frame(container_frame)
-        canvas_frame.pack(fill="both", expand=True)
-
-        # 创建主Canvas和滚动条
-        main_canvas = tk.Canvas(canvas_frame)
-        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=main_canvas.yview)
-
-        # 创建一个框架来包含所有内容
-        content_frame = ttk.Frame(main_canvas)
-
-        # 配置Canvas
-        main_canvas.configure(yscrollcommand=scrollbar.set)
-
-        # 创建两个LabelFrame分别用于输入和输出设备
-        input_frame = ttk.LabelFrame(content_frame, text="输入设备（麦克风）", padding=10)
-        input_frame.pack(fill="x", padx=10, pady=5)
-
-        output_frame = ttk.LabelFrame(content_frame, text="输出设备（扬声器）", padding=10)
-        output_frame.pack(fill="x", padx=10, pady=5)
-
-        # 添加输入设备选项
-        input_devices, output_devices = sound_channel.get_audio_devices()
-        for device in input_devices:
-            radio = ttk.Radiobutton(
-                input_frame,
-                text=f"{device['name']}\n采样率: {device['sample_rate']}Hz, 通道数: {device['channels']}" + (
-                    ", 默认设备" if device['default'] else ""),
-                variable=self.selected_input,
-                value=str(device['index'])
-            )
-            radio.pack(anchor='w', pady=2)
-            if device['index'] == sound_channel.device_indexes[0]:
-                self.selected_input.set(str(device['index']))
-
-        # 添加输出设备选项
-        for device in output_devices:
-            radio = ttk.Radiobutton(
-                output_frame,
-                text=f"{device['name']}\n采样率: {device['sample_rate']}Hz, 通道数: {device['channels']}" + (
-                    ", 默认设备" if device['default'] else ""),
-                variable=self.selected_output,
-                value=str(device['index'])
-            )
-            radio.pack(anchor='w', pady=2)
-            if device['index'] == sound_channel.device_indexes[1]:
-                self.selected_output.set(str(device['index']))
-
-        # 放置滚动条和Canvas
-        scrollbar.pack(side="right", fill="y")
-        main_canvas.pack(side="left", fill="both", expand=True)
-
-        # 在Canvas中创建窗口
-        canvas_frame = main_canvas.create_window((0, 0), window=content_frame, anchor="nw")
-
-        # 添加确认和取消按钮（在容器框架底部）
-        button_frame = ttk.Frame(container_frame)
-        button_frame.pack(fill="x", padx=10, pady=5, side="bottom")
-
-        ttk.Button(
-            button_frame,
-            text="确认",
-            command=lambda: self.on_dialog_confirm(dialog)
-        ).pack(side="right", padx=5)
-
-        ttk.Button(
-            button_frame,
-            text="取消",
-            command=dialog.destroy
-        ).pack(side="right", padx=5)
-
-        # 配置Canvas滚动区域
-        def configure_scroll_region(event):
-            main_canvas.configure(scrollregion=main_canvas.bbox("all"))
-
-        def configure_canvas_width(event):
-            main_canvas.itemconfig(canvas_frame, width=event.width)
-
-        content_frame.bind("<Configure>", configure_scroll_region)
-        main_canvas.bind("<Configure>", configure_canvas_width)
-
-        # 绑定鼠标滚轮
-        def on_mousewheel(event):
-            main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        main_canvas.bind_all("<MouseWheel>", on_mousewheel)
-
-        # 设置弹窗为模态
-        dialog.transient(self)
-        dialog.grab_set()
-        self.wait_window(dialog)
-
-    def on_dialog_confirm(self, dialog):
         desc = self.dropdown1.get()
         kbps = sound_channel.RATES_DESC_TO_IDX[desc]
-        channel_base.reload_send_speed(kbps, int(self.selected_input.get()), int(self.selected_output.get()))
-        dialog.destroy()
+        dialog = AudioSetDialog(self, kbps)
+        self.wait_window(dialog)
 
     def reset_input_field(self):
         self.selected_file = None
@@ -580,7 +620,7 @@ class ChatInterface(tk.Tk):
     def destroy(self):
         self.hotkey_listener.stop()
         # 在这里添加其他线程的销毁动作
-        channel_base.stop()
+        channel_base.terminate()
         # 调用父类的 destroy 方法
         super().destroy()
 

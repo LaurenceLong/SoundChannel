@@ -74,6 +74,7 @@ INIT_RECV_kbps = 40
 FILE_UNIT_KB = 512
 MULTI_FILE_SIZE_BYTES = 1024 * FILE_UNIT_KB
 
+DEV_NULL = -88
 DEV_KEEP = -99
 
 
@@ -148,15 +149,22 @@ def create_config(kbps, input_device_index, output_device_index):
 device_indexes = [None, None]
 
 
+def iz_device_changed(config, input_device_index, output_device_index):
+    global device_indexes
+    return (input_device_index != DEV_KEEP and input_device_index != config.input_device_index) or \
+        (output_device_index != DEV_KEEP and output_device_index != config.output_device_index) or \
+        DEV_NULL in device_indexes
+
+
 def set_device_indexes(input_device_index, output_device_index):
     global device_indexes
     device_indexes = [input_device_index, output_device_index]
 
 
 def determine_device_index(config, input_device_index, output_device_index):
-    if input_device_index == DEV_KEEP:
+    if input_device_index in [DEV_NULL, DEV_KEEP]:
         input_device_index = config.input_device_index
-    if output_device_index == DEV_KEEP:
+    if output_device_index in [DEV_NULL, DEV_KEEP]:
         output_device_index = config.output_device_index
     return input_device_index, output_device_index
 
@@ -191,13 +199,21 @@ def get_default_audio_devices():
 def get_audio_devices():
     p = pyaudio.PyAudio()
 
-    # 创建两个字典分别存储输入和输出设备
+    # 创建两个列表分别存储输入和输出设备
     input_devices = []
     output_devices = []
 
     # 获取默认输入设备信息
-    default_input_idx = p.get_default_input_device_info()['index']
-    default_output_idx = p.get_default_output_device_info()['index']
+    try:
+        default_input_idx = p.get_default_input_device_info()['index']
+    except IOError:
+        default_input_idx = None  # 没有默认输入设备
+
+    try:
+        default_output_idx = p.get_default_output_device_info()['index']
+    except IOError:
+        default_output_idx = None  # 没有默认输出设备
+
     # 遍历所有设备
     for i in range(p.get_device_count()):
         device_info = p.get_device_info_by_index(i)
@@ -217,7 +233,7 @@ def get_audio_devices():
             output_devices.append({
                 'index': device_info['index'],
                 'name': device_info['name'],
-                'channels': device_info['maxInputChannels'],
+                'channels': device_info['maxOutputChannels'],
                 'sample_rate': int(device_info['defaultSampleRate']),
                 'default': device_info['index'] == default_output_idx
             })
@@ -720,6 +736,8 @@ class SoundChannelBase:
         self.negot_r_stream = self.create_recv_stream(self.negot_interface)
         self.negot_s_stream = self.create_send_stream(self.negot_interface)
 
+        set_device_indexes(self.send_cfg.input_device_index, self.send_cfg.output_device_index)
+
         self.opened_streams.append(self.r_stream)
         self.opened_streams.append(self.s_stream)
         self.opened_streams.append(self.negot_r_stream)
@@ -928,52 +946,60 @@ class SoundChannelBase:
         self.resume_loop_thread(idx)
 
     def reload_recv_speed(self, kbps, input_device_index=DEV_KEEP, output_device_index=DEV_KEEP):
-        device_changed = input_device_index != DEV_KEEP and input_device_index != self.send_cfg.input_device_index or \
-                         output_device_index != DEV_KEEP and output_device_index != self.send_cfg.output_device_index
+        device_changed = iz_device_changed(self.recv_cfg, input_device_index, output_device_index)
         if kbps == self.recv_cfg.modem_bps // 1000 and not device_changed:
             return False
         log.info("Change recv speed kbps=%s idid=%s odid=%s" % (kbps, input_device_index, output_device_index))
         idx = 0  # listen thread id
-        self.pause_loop_thread(idx)
-
-        input_device_index, output_device_index = determine_device_index(self.recv_cfg, input_device_index,
-                                                                         output_device_index)
-        set_device_indexes(input_device_index, output_device_index)
-        self.recv_cfg = create_config(kbps, input_device_index, output_device_index)
-        self.send_cfg = create_config(self.send_cfg.modem_bps // 1000, input_device_index, output_device_index)
-        self.negot_cfg = create_negot_config(input_device_index, output_device_index)
-
         if device_changed:
-            self._stop()
+            input_device_index, output_device_index = determine_device_index(self.recv_cfg, input_device_index,
+                                                                             output_device_index)
+            self.recv_cfg = create_config(kbps, input_device_index, output_device_index)
+            self.send_cfg = create_config(self.send_cfg.modem_bps // 1000, input_device_index, output_device_index)
+            self.negot_cfg = create_negot_config(input_device_index, output_device_index)
+
+            self.release_all_devices()
             self.change_device()
             self._ready()
-
-        self.resume_loop_thread(idx)
+            time.sleep(1)
+        else:
+            self.pause_loop_thread(idx)
+            self.recv_cfg = create_config(kbps, self.recv_cfg.input_device_index, self.recv_cfg.output_device_index)
+            self.resume_loop_thread(idx)
         return True
 
     def reload_send_speed(self, kbps, input_device_index=DEV_KEEP, output_device_index=DEV_KEEP):
-        device_changed = input_device_index != DEV_KEEP and input_device_index != self.send_cfg.input_device_index or \
-                         output_device_index != DEV_KEEP and output_device_index != self.send_cfg.output_device_index
+        device_changed = iz_device_changed(self.send_cfg, input_device_index, output_device_index)
         if kbps == self.send_cfg.modem_bps // 1000 and not device_changed:
             return False
+        log.info("Change send speed kbps=%s idid=%s odid=%s" % (kbps, input_device_index, output_device_index))
         idx = 1  # send thread id
-        log.info("Change recv speed kbps=%s idid=%s odid=%s" % (kbps, input_device_index, output_device_index))
-        self.pause_loop_thread(idx)
-
-        input_device_index, output_device_index = determine_device_index(self.send_cfg, input_device_index,
-                                                                         output_device_index)
-        set_device_indexes(input_device_index, output_device_index)
-        self.recv_cfg = create_config(self.recv_cfg.modem_bps // 1000, input_device_index, output_device_index)
-        self.send_cfg = create_config(kbps, input_device_index, output_device_index)
-        self.negot_cfg = create_negot_config(input_device_index, output_device_index)
-
         if device_changed:
-            self._stop()
+            input_device_index, output_device_index = determine_device_index(self.send_cfg, input_device_index,
+                                                                             output_device_index)
+            self.recv_cfg = create_config(self.recv_cfg.modem_bps // 1000, input_device_index, output_device_index)
+            self.send_cfg = create_config(kbps, input_device_index, output_device_index)
+            self.negot_cfg = create_negot_config(input_device_index, output_device_index)
+
+            self.release_all_devices()
             self.change_device()
             self._ready()
-
-        self.resume_loop_thread(idx)
+            time.sleep(1)
+        else:
+            self.pause_loop_thread(idx)
+            self.send_cfg = create_config(kbps, self.send_cfg.input_device_index, self.send_cfg.output_device_index)
+            self.resume_loop_thread(idx)
         return True
+
+    def reload_default_devices(self):
+        indexes = [None, None]
+        self.recv_cfg = create_config(self.recv_cfg.modem_bps // 1000, indexes[0], indexes[1])
+        self.send_cfg = create_config(self.send_cfg.modem_bps // 1000, indexes[0], indexes[1])
+        self.negot_cfg = create_negot_config(indexes[0], indexes[1])
+        self.release_all_devices()
+        self.change_device()
+        self._ready()
+        time.sleep(1)
 
     def negot_message(self, negot_type, negot_info, quiet=True):
         msg = WrappedData(VAL_MSG_NAME, negot_type + SEP + negot_info, quiet=quiet)
@@ -1219,26 +1245,51 @@ class SoundChannelBase:
                                 log.info(f"Request resend multipart file: {filename}")
                                 self.negot_resend_whole(filename)
 
-    def stop(self):
-        self.listening = False
-        self._stop()
-
-    def _ready(self):
-        for event in self.ready_events:
-            event.set()
-
     def _stop(self):
         for event in self.ready_events:
             event.clear()
         for event in self.stop_events:
             event.set()
+
+    def _ready(self):
+        for event in self.ready_events:
+            event.set()
+
+    def release_all_devices(self):
+        self._stop()
         for stream in self.opened_streams:
             if stream:
                 try:
                     stream.close()
                 except:
                     pass
-            self.opened_streams.remove(stream)
+        self.opened_streams.clear()
+        if self.data_interface.win_pyaudio:
+            self.data_interface.win_pyaudio.terminate()
+            self.data_interface.win_pyaudio = None
+        if self.negot_interface.win_pyaudio:
+            self.negot_interface.win_pyaudio.terminate()
+            self.negot_interface.win_pyaudio = None
+
+        set_device_indexes(DEV_NULL, DEV_NULL)
+
+    def terminate(self):
+        self.listening = False
+        self.release_all_devices()
+
+
+def print_audio_devices():
+    input_devices, output_devices = get_audio_devices()
+
+    print("\nInput Devices:")
+    for device in input_devices:
+        print(f"Index: {device['index']}, Name: {device['name']}, Channels: {device['channels']}, "
+              f"Sample Rate: {device['sample_rate']}, Default: {device['default']}")
+
+    print("\nOutput Devices:")
+    for device in output_devices:
+        print(f"Index: {device['index']}, Name: {device['name']}, Channels: {device['channels']}, "
+              f"Sample Rate: {device['sample_rate']}, Default: {device['default']}")
 
 
 def test_send_msg():
@@ -1247,27 +1298,30 @@ def test_send_msg():
         content = fd.read()
     base.send_message(content)
     time.sleep(3)
-    base.stop()
+    base.terminate()
 
 
 def test_send_file():
     base = SoundChannelBase()
     base.send_file("test.txt")
     time.sleep(3)
-    base.stop()
+    base.terminate()
 
 
 def test_change_device():
     base = SoundChannelBase()
     with open("test.txt", "r", encoding="utf-8") as fd:
         content = fd.read()
-    base.reload_send_speed(base.send_cfg.modem_bps // 1000, 2, 4)
-    time.sleep(3)
+    print_audio_devices()
     base.send_message(content)
+    time.sleep(3)
+    base.reload_send_speed(base.send_cfg.modem_bps // 1000, 2, 4)
+    base.send_message(content)
+    time.sleep(3)
     base.reload_send_speed(base.send_cfg.modem_bps // 1000, 1, 4)
     base.send_message(content)
     time.sleep(3)
-    base.stop()
+    base.terminate()
 
 
 if __name__ == "__main__":
