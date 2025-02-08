@@ -346,7 +346,6 @@ class AudioSetDialog(tk.Toplevel):
 
     def refresh_dialog(self):
         # 清除现有的设备列表
-        print(sound_channel.device_indexes)
         for widget in self.input_frame.winfo_children():
             widget.destroy()
         for widget in self.output_frame.winfo_children():

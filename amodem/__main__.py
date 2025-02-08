@@ -6,8 +6,6 @@ import os
 import sys
 import zlib
 
-import pkg_resources
-
 from . import async_reader
 from . import audio
 from . import calib
@@ -191,7 +189,7 @@ class _Dummy:
 
 
 def _version():
-    return pkg_resources.require('amodem')[0].version
+    return "unknown"
 
 
 def _config_log(args):
