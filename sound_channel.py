@@ -487,6 +487,7 @@ class ResendFrameBitsIterator:
             return next(self.current_bits)
 
     def arrange_resend_frame(self, frame_id):
+        log.info("Resend frame id: %s" % frame_id)
         if frame_id in self.id_to_frame_bits:
             self.resend_queue.put(frame_id)
 
@@ -656,7 +657,7 @@ class FrameWriter(FrameManager):
 class SoundChannelBase:
 
     def __init__(self, ):
-        self.use_lib = LIB_SD
+        self.use_lib = LIB_PYAUDIO
         self.enable_correction = True
         self.rfbi_bits: ResendFrameBitsIterator = None
         self.filename_to_path = {}

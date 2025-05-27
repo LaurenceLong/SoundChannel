@@ -15,7 +15,7 @@ def _checksum_func(x):
 
 
 class Checksum:
-    fmt = '>L'  # unsigned longs (32-bit)
+    fmt = '>L'  # crc32 unsigned longs (32-bit)
     size = struct.calcsize(fmt)
 
     def encode(self, payload, enable_correction=False, is_last_block=False):
@@ -29,12 +29,12 @@ class Checksum:
         received, = struct.unpack(self.fmt, bytes(data[:self.size]))
         payload = data[self.size:]
         expected = _checksum_func(payload)
-        if enable_correction:
-            eof_detected = received == _checksum_func(struct.pack(self.fmt, expected))
-            valid_fail = not (received == expected or eof_detected)
-        else:
+        if not enable_correction:
             eof_detected = False
             valid_fail = received != expected
+        else:
+            eof_detected = received == _checksum_func(struct.pack(self.fmt, expected))
+            valid_fail = received != expected and not eof_detected
         if valid_fail:
             log.warning('Invalid checksum: %08x != %08x', received, expected)
             raise ValueError('Invalid checksum')
@@ -43,16 +43,16 @@ class Checksum:
 
 
 class Framer:
-    chunk_size = 255
+    chunk_size = 250
     prefix_fmt = '>B'
     prefix_len = struct.calcsize(prefix_fmt)
     fid_fmt = '>H'
     fid_len = struct.calcsize(fid_fmt)
-    crc_32_len = 4  # 4 bytes crc
+    crc32_len = 4  # 4 bytes crc
 
     enable_correction_chunk_size = chunk_size - rs_codec.RSCodecProvider.get_num_symbols()
-    enable_correction_data_size = enable_correction_chunk_size - fid_len - prefix_len - crc_32_len
-    raw_data_size = chunk_size - prefix_len - crc_32_len
+    enable_correction_data_size = enable_correction_chunk_size - fid_len - prefix_len - crc32_len
+    raw_data_size = chunk_size - prefix_len - crc32_len
 
     checksum = Checksum()
 
@@ -78,9 +78,8 @@ class Framer:
             current_length = len(packed)
             if current_length > padded_size:
                 raise ValueError(f"Packed data length ({current_length}) exceeds target length ({padded_size})")
-            padding_length = padded_size - current_length
-            packed.extend(b'\x00' * padding_length)
-            return packed, frame_id
+            packed.extend(b'\x00' * (padded_size - current_length))
+            return rs_codec.encrypt_pack(packed), frame_id
 
     def encode(self, data, enable_correction=False):
         if not enable_correction:
