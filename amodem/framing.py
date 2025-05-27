@@ -43,7 +43,7 @@ class Checksum:
 
 
 class Framer:
-    chunk_size = 250
+    chunk_size = 255
     prefix_fmt = '>B'
     prefix_len = struct.calcsize(prefix_fmt)
     fid_fmt = '>H'
