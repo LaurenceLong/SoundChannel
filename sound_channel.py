@@ -16,7 +16,7 @@ from enum import Enum
 import numpy as np
 import pyaudio
 
-from amodem import audio
+from amodem import audio, sd
 from amodem import common
 from amodem import framing
 from amodem import sampling
@@ -39,6 +39,9 @@ class _tmp:
 
 _config_log(_tmp())
 
+LIB_PYAUDIO = "pyaudio"
+LIB_SD = "sounddevice"
+
 KEY_NAME = "name"
 KEY_MSG = "msg"
 KEY_SIZE = "size"
@@ -49,7 +52,7 @@ VAL_MSG_NAME = "<msg_str>"
 SEP = ";;"
 MULTI_FILE_SEP = ".part."
 
-NEGOT_TAG = "~!@#$%^&*()_+"
+NEGOT_TAG = "~!"
 NEGOT_START = "NEGOT_START" + NEGOT_TAG
 NEGOT_RECV_SPEED = "NEGOT_RECV_SPEED" + NEGOT_TAG
 NEGOT_SEND_SPEED = "NEGOT_SEND_SPEED" + NEGOT_TAG
@@ -242,8 +245,7 @@ def get_audio_devices():
     return input_devices, output_devices
 
 
-def cal_send_time(config: Configuration, data_bytes_size):
-    data_per_frame = (framing.Framer.block_size - 4)  # 4 bytes frame_id
+def cal_send_time(config: Configuration, data_bytes_size, data_per_frame):
     silence_time = config.silence_start + (250 + 50 + 200 + 50) / 1000 + config.silence_stop
     data_time = (math.ceil(data_bytes_size / data_per_frame) * framing.Framer.chunk_size) * 8 / config.modem_bps
     return silence_time + data_time
@@ -506,7 +508,8 @@ class FrameManager:
         self.frames_list = []  # 用于保持有序的frame id
         self.frames_dict = {}  # 用于快速查找frame内容
         self.might_missed_frames = set()  # 用于存储可能丢失的frame id
-        self.max_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / (framing.Framer.block_size - 4))
+        self.data_per_frame = framing.Framer.enable_correction_data_size
+        self.max_frame_cnt = math.ceil(MULTI_FILE_SIZE_BYTES / self.data_per_frame)
 
     def is_continuous(self):
         return all(y - x == 1 for x, y in zip(self.frames_list, self.frames_list[1:]))
@@ -585,9 +588,10 @@ class FrameWriter(FrameManager):
         frame_bytes_size = framing.Framer.chunk_size
         self.frame_per_second = (modem_bps / 8) // frame_bytes_size
         self.num_frames_per_check = max(1, self.frame_per_second)
-        self.latent_time_secs = cal_send_time(create_negot_config(None, None), 1) + 2  # must > latent(negot + check)
+        self.latent_time_secs = cal_send_time(create_negot_config(None, None), 1, self.data_per_frame) + 2
         self.error_limit = math.ceil(self.frame_per_second * self.latent_time_secs)
         self.num_sequential_missing = max(2, int(round(self.num_frames_per_check / 4)))
+        self.test = set([_ for _ in range(10, 50) if _ % 8 == 0])
 
     def get_dst(self):
         return self.dst
@@ -599,7 +603,9 @@ class FrameWriter(FrameManager):
         return True
 
     def write(self, data, frame_id):
-        if data == framing.Framer.NULL_CHAR:
+        if data == framing.Framer.EOF or frame_id in self.test:
+            if frame_id in self.test:
+                self.test.remove(frame_id)
             if abs(frame_id) >= self.max_frame_cnt:
                 frame_id = self.last_frame_id + 1  # frame_id correction
             if self.paused_error_frame_id is None:
@@ -653,8 +659,8 @@ class FrameWriter(FrameManager):
 class SoundChannelBase:
 
     def __init__(self, ):
-        self.cut_eof = True
-        self.use_frame_id = True
+        self.use_lib = LIB_SD
+        self.enable_correction = False
         self.rfbi_bits: ResendFrameBitsIterator = None
         self.filename_to_path = {}
         self.merge_files_record = {}
@@ -766,8 +772,13 @@ class SoundChannelBase:
         return self.negot_cfg
 
     def create_interface(self, cfg):
-        interface = audio.Interface(cfg)
-        interface.load("")
+        if self.use_lib == LIB_PYAUDIO:
+            interface = audio.Interface(cfg)
+            interface.load("")
+        elif self.use_lib == LIB_SD:
+            interface = sd.Interface(cfg)
+        else:
+            raise Exception(f"Lib {self.use_lib} not supported")
         return interface
 
     def create_send_stream(self, interface):
@@ -814,7 +825,7 @@ class SoundChannelBase:
 
     def receive_data_signal(self, stream, config, dst=None, filename=None, stop_event: threading.Event = None):
         temp_dst = tempfile.TemporaryFile()
-        if self.use_frame_id:
+        if self.enable_correction:
             fw = FrameWriter(filename, temp_dst, config.modem_bps, self.negot_resend_frame)
             ret_fw = self.receive_data_signal_compressed(stream, config, dst=fw, stop_event=stop_event)
             if ret_fw and fw.validation():
@@ -850,10 +861,11 @@ class SoundChannelBase:
 
             sampler = sampling.Sampler(signal, sampling.defaultInterpolator, freq=freq)
             if not isinstance(dst, FrameWriter):
-                receiver.run(sampler, gain=1.0 / amplitude, output=dst, stop_event=stop_event, cut_eof=self.cut_eof)
+                receiver.run(sampler, gain=1.0 / amplitude, output=dst, stop_event=stop_event,
+                             enable_correction=self.enable_correction)
             else:
-                receiver.run(sampler, gain=1.0 / amplitude, output=dst, stop_event=stop_event, cut_eof=self.cut_eof,
-                             raise_err=False, use_fid=True)
+                receiver.run(sampler, gain=1.0 / amplitude, output=dst, stop_event=stop_event,
+                             enable_correction=self.enable_correction, raise_err=False)
             return dst
         except BaseException:  # pylint: disable=broad-except
             traceback.print_exc()
@@ -880,13 +892,13 @@ class SoundChannelBase:
 
         log.info("Starting modulation")
         framer = Framer()
-        if self.use_frame_id:
-            bits_with_fid = framing.encode(compressed, framer=framer, cut_eof=self.cut_eof, use_fid=self.use_frame_id)
+        if self.enable_correction:
+            bits_with_fid = framing.encode(compressed, framer=framer, enable_correction=self.enable_correction)
             self.rfbi_bits = ResendFrameBitsIterator(bits_with_fid, filename)
             sender.modulate(bits=self.rfbi_bits, stop_event=stop_event)
             self.rfbi_bits = None
         else:
-            bits = framing.encode(compressed, framer=framer, cut_eof=self.cut_eof, use_fid=self.use_frame_id)
+            bits = framing.encode(compressed, framer=framer, enable_correction=self.enable_correction)
             sender.modulate(bits=bits, stop_event=stop_event)
 
         data_duration = sender.offset - training_duration
@@ -1181,7 +1193,8 @@ class SoundChannelBase:
                         bytes_size = wrapped_data.get_size()
                         self.notify_event_queue.put(Event(EvtKeys.NOTIFY_FILE, file_path, o1=bytes_size))
 
-                        send_time = cal_send_time(config, bytes_size)
+                        data_per_frame = framing.Framer.enable_correction_data_size if self.enable_correction else framing.Framer.raw_data_size
+                        send_time = cal_send_time(config, bytes_size, data_per_frame)
                         send_event_queue.put(Event(EvtKeys.SEND_FILE_START, file_path, bytes_size, send_time))
 
                         filename = os.path.basename(file_path)
@@ -1218,7 +1231,8 @@ class SoundChannelBase:
                     self.notify_event_queue.put(Event(EvtKeys.NOTIFY_FILE, None))
                     filename = os.path.basename(handshake.get(KEY_NAME))
                     bytes_size = handshake.get(KEY_SIZE)
-                    send_time = cal_send_time(config, bytes_size)
+                    data_per_frame = framing.Framer.enable_correction_data_size if self.enable_correction else framing.Framer.raw_data_size
+                    send_time = cal_send_time(config, bytes_size, data_per_frame)
                     listen_event_queue.put(Event(EvtKeys.RECV_FILE_START, filename, bytes_size, send_time))
 
                     f_path = os.path.join(RECEIVE_FOLDER, filename)
@@ -1264,12 +1278,15 @@ class SoundChannelBase:
                 except:
                     pass
         self.opened_streams.clear()
-        if self.data_interface.win_pyaudio:
-            self.data_interface.win_pyaudio.terminate()
-            self.data_interface.win_pyaudio = None
-        if self.negot_interface.win_pyaudio:
-            self.negot_interface.win_pyaudio.terminate()
-            self.negot_interface.win_pyaudio = None
+        if self.use_lib == LIB_PYAUDIO:
+            if self.data_interface.win_pyaudio:
+                self.data_interface.win_pyaudio.terminate()
+                self.data_interface.win_pyaudio = None
+            if self.negot_interface.win_pyaudio:
+                self.negot_interface.win_pyaudio.terminate()
+                self.negot_interface.win_pyaudio = None
+        elif self.use_lib == LIB_SD:
+            pass
 
         set_device_indexes(DEV_NULL, DEV_NULL)
 

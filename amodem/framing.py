@@ -3,33 +3,36 @@ import functools
 import itertools
 import logging
 import struct
-from math import erfc
-
-import numpy as np
-import reedsolo
 
 from . import common
 
 log = logging.getLogger(__name__)
 
-# 创建RS编码器
-NUM_SYMBOLS = 32
-rs_codec = reedsolo.RSCodec(NUM_SYMBOLS)  # number of ecc symbols (you can repair nsym/2 errors and nsym erasures.
 
+class RSCodecProvider:
+    _codec = None
+    _current_num_symbols = None
+    _expect_num_symbols = 32
 
-def ber_mqam(snr_db, M):
-    # 根据snr重新协商纠错数量
-    # Convert SNR from dB to linear scale
-    snr_linear = 10 ** (snr_db / 10.0)
-    # Calculate BER for M-QAM
-    ber = (2 * (np.sqrt(M) - 1) / (np.sqrt(M) * np.log2(M))) * \
-          erfc(np.sqrt(3 * snr_linear / (2 * (M - 1))))
-    return ber
+    @classmethod
+    def get_num_symbols(cls):
+        return cls._expect_num_symbols
 
+    @classmethod
+    def set_num_symbols(cls, num_symbols: int):
+        cls._expect_num_symbols = num_symbols
 
-def set_rs_codec(snr_db):
-    global NUM_SYMBOLS
-    global rs_codec
+    @classmethod
+    def get_codec(cls):
+        """
+        获取或创建RS编码器实例。
+        如果num_symbols与当前缓存的编码器不同，则创建一个新的编码器。
+        """
+        if cls._codec is None or cls._current_num_symbols != cls._expect_num_symbols:
+            import reedsolo
+            cls._current_num_symbols = cls._expect_num_symbols
+            cls._codec = reedsolo.RSCodec(cls._current_num_symbols)
+        return cls._codec
 
 
 def encode_with_rs(data):
@@ -37,27 +40,27 @@ def encode_with_rs(data):
     if not isinstance(data, bytearray):
         data = bytearray(data)
     # 编码数据
-    encoded = rs_codec.encode(data)
+    encoded = RSCodecProvider.get_codec().encode(data)
     return encoded
 
 
 def decode_with_rs(encoded_data):
     try:
         # 解码数据
-        decoded, _, _ = rs_codec.decode(encoded_data)
+        decoded, _, _ = RSCodecProvider.get_codec().decode(encoded_data)
         return decoded
-    except reedsolo.ReedSolomonError as e:
+    except Exception:
         # import traceback
         # traceback.print_exc()
         return encoded_data
 
 
-def encode_pack(data):
+def encrypt_pack(data):
     encoded = encode_with_rs(data)
     return encoded
 
 
-def decode_pack(encoded_data, chunk_size):
+def decrypt_pack(encoded_data, chunk_size):
     chunk = bytearray(itertools.islice(encoded_data, chunk_size))
     if len(chunk) < chunk_size:
         raise ValueError(f'Incomplete frame, length {len(chunk)} < {chunk_size}(required)')
@@ -74,112 +77,114 @@ class Checksum:
     fmt = '>L'  # unsigned longs (32-bit)
     size = struct.calcsize(fmt)
 
-    def encode(self, payload, cut_eof=False, is_last_block=False):
+    def encode(self, payload, enable_correction=False, is_last_block=False):
         checksum = _checksum_func(payload)
-        if cut_eof and is_last_block:
-            checksum = _checksum_func(struct.pack('>I', checksum))
+        print(1111, len(payload), payload)
+        if enable_correction and is_last_block:
+            checksum = _checksum_func(struct.pack(self.fmt, checksum))
         encoded = struct.pack(self.fmt, checksum) + payload
+        print(2222, len(encoded), encoded)
         return encoded
 
-    def decode(self, data, cut_eof=False):
+    def decode(self, data, enable_correction=False):
         received, = struct.unpack(self.fmt, bytes(data[:self.size]))
         payload = data[self.size:]
         expected = _checksum_func(payload)
-        if cut_eof:
-            eof_detected = received == _checksum_func(struct.pack('>I', expected))
-            valid_fail = received != expected and not eof_detected
+        if enable_correction:
+            eof_detected = received == _checksum_func(struct.pack(self.fmt, expected))
+            valid_fail = not (received == expected or eof_detected)
         else:
             eof_detected = False
             valid_fail = received != expected
         if valid_fail:
             log.warning('Invalid checksum: %08x != %08x', received, expected)
+            print(2222, len(payload), payload)
             raise ValueError('Invalid checksum')
         log.debug('Good checksum: %08x', received)
         return payload, eof_detected
 
 
 class Framer:
+
     chunk_size = 255
-    unencrypted_size = chunk_size - NUM_SYMBOLS
-    block_size = unencrypted_size - 1 - 4  # 1 bytes length, 4 bytes crc
     prefix_fmt = '>B'
-    uint_32_fmt = '>L'
     prefix_len = struct.calcsize(prefix_fmt)
+    fid_fmt = '>H'
+    fid_len = struct.calcsize(fid_fmt)
+    crc32_len = 4  # 4 bytes crc
+
+    enable_correction_chunk_size = chunk_size - RSCodecProvider.get_num_symbols()
+    enable_correction_data_size = enable_correction_chunk_size - fid_len - prefix_len - crc32_len
+    raw_data_size = chunk_size - prefix_len - crc32_len
+
     checksum = Checksum()
 
     EOF = b''
-    NULL_CHAR = b'\x04'
 
     def __init__(self):
         self.frame_id = 0
 
-    def _pack(self, block, padded_size=None, cut_eof=False, is_last_block=False, use_fid=False):
-        frame = self.checksum.encode(block, cut_eof=cut_eof, is_last_block=is_last_block)
+    def _pack(self, block, enable_correction=False, is_last_block=False):
+        frame = self.checksum.encode(block, enable_correction=enable_correction, is_last_block=is_last_block)
         frame_id = self.frame_id
         self.frame_id += 1
-        if not use_fid:
+        if not enable_correction:
             packed = bytearray(struct.pack(self.prefix_fmt, len(frame)) + frame)
+            padded_size = self.chunk_size
         else:
-            # 尾部加frame_id
+            # add frame_id at head
             packed = bytearray(
-                struct.pack(self.prefix_fmt, len(frame)) + frame + struct.pack(self.uint_32_fmt, frame_id))
+                struct.pack(self.fid_fmt, frame_id) + struct.pack(self.prefix_fmt, len(frame)) + frame)
+            padded_size = self.enable_correction_chunk_size
 
-        if padded_size is not None:
-            current_length = len(packed)
-            if current_length > padded_size:
-                raise ValueError(f"Packed data length ({current_length}) exceeds target length ({padded_size})")
+        current_length = len(packed)
+        if current_length > padded_size:
+            raise ValueError(f"Packed data length ({current_length}) exceeds target length ({padded_size})")
+        padding_length = padded_size - current_length
+        packed.extend(b'\x00' * padding_length)
 
-            padding_length = padded_size - current_length
-            packed.extend(b'\x00' * padding_length)
-        packed = encode_pack(packed)
+        if not enable_correction:
+            pass
+        else:
+            packed = encrypt_pack(packed)
         return packed, frame_id
 
-    def encode(self, data, cut_eof=False, use_fid=False):
-        if not use_fid:
-            iterator = common.iterate(data=data, size=self.block_size, func=bytearray, truncate=False)
+    def encode(self, data, enable_correction=False):
+        if not enable_correction:
+            iterator = common.iterate(data=data, size=self.raw_data_size, func=bytearray, truncate=False)
         else:
-            # 4 bytes frame_id
-            iterator = common.iterate(data=data, size=self.block_size - 4, func=bytearray, truncate=False)
+            iterator = common.iterate(data=data, size=self.enable_correction_data_size, func=bytearray, truncate=False)
         prev_block = next(iterator, None)
         for current_block in iterator:
-            packed, frame_id = self._pack(block=prev_block, padded_size=self.unencrypted_size, use_fid=use_fid)
-            if not use_fid:
-                yield packed
-            else:
-                yield packed, frame_id
-
+            yield self._pack(block=prev_block, enable_correction=enable_correction)
             prev_block = current_block
 
         if prev_block is not None:
-            packed, frame_id = self._pack(block=prev_block, padded_size=self.unencrypted_size, cut_eof=cut_eof,
-                                          is_last_block=cut_eof, use_fid=use_fid)
-            if not use_fid:
-                yield packed
-            else:
-                yield packed, frame_id
+            yield self._pack(block=prev_block, enable_correction=enable_correction, is_last_block=enable_correction)
 
-        if not cut_eof:
+        if not enable_correction:
             # 添加EOF块
-            packed, frame_id = self._pack(block=self.EOF, padded_size=self.unencrypted_size)
-            if not use_fid:
-                yield packed
-            else:
-                yield packed, frame_id
+            yield self._pack(block=self.EOF)
 
-    def decode(self, data, cut_eof=False, raise_err=True, use_fid=False):
+    def decode(self, data, enable_correction=False, raise_err=True):
         data = iter(data)
         while True:
             try:
-                pack = decode_pack(data, self.chunk_size)
+                if not enable_correction:
+                    pack = bytearray(itertools.islice(data, self.chunk_size))
+                else:
+                    pack = decrypt_pack(data, self.chunk_size)
+                    frame_id, = _take_fmt(pack, self.fid_fmt)
+                print(4444, len(pack), pack)
                 length, = _take_fmt(pack, self.prefix_fmt)
                 frame = _take_len(pack, length)
-                frame_id, = _take_fmt(pack, self.uint_32_fmt)
-                block, eof_detected = self.checksum.decode(frame, cut_eof=cut_eof)
+                block, eof_detected = self.checksum.decode(frame, enable_correction=enable_correction)
+
                 if block == self.EOF:
                     log.debug('EOF frame detected')
                     return
 
-                if not use_fid:
+                if not enable_correction:
                     yield block
                 else:
                     yield block, frame_id
@@ -192,13 +197,12 @@ class Framer:
             except Exception as e:
                 if raise_err:
                     raise e
-
-                frame_id = self.frame_id
-                self.frame_id += 1
-                if not use_fid:
-                    yield self.NULL_CHAR
                 else:
-                    yield self.NULL_CHAR, frame_id
+                    self.frame_id += 1
+                    if not enable_correction:
+                        yield self.EOF
+                    else:
+                        yield self.EOF, self.frame_id
 
 
 def _take_fmt(data, fmt):
@@ -239,15 +243,15 @@ class BitPacker:
 
 
 @chain_wrapper
-def encode(data, framer=None, cut_eof=False, use_fid=False):
+def encode(data, framer=None, enable_correction=False):
     converter = BitPacker()
     framer = framer or Framer()
-    if not use_fid:
-        for frame in framer.encode(data, cut_eof=cut_eof, use_fid=use_fid):
+    if not enable_correction:
+        for frame in framer.encode(data, enable_correction=enable_correction):
             for byte in frame:
                 yield converter.to_bits[byte]
     else:
-        for frame, frame_id in framer.encode(data, cut_eof=cut_eof, use_fid=use_fid):
+        for frame, frame_id in framer.encode(data, enable_correction=enable_correction):
             for byte in frame:
                 yield converter.to_bits[byte], frame_id
 
@@ -260,11 +264,11 @@ def _to_bytes(bits):
         yield [converter.to_byte[chunk]]
 
 
-def decode_frames(bits, framer=None, cut_eof=False, raise_err=True, use_fid=False):
+def decode_frames(bits, framer=None, enable_correction=False, raise_err=True):
     framer = framer or Framer()
-    if not use_fid:
-        for frame in framer.decode(_to_bytes(bits), cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+    if not enable_correction:
+        for frame in framer.decode(_to_bytes(bits), enable_correction=enable_correction, raise_err=raise_err):
             yield bytes(frame)
     else:
-        for frame, frame_id in framer.decode(_to_bytes(bits), cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+        for frame, frame_id in framer.decode(_to_bytes(bits), enable_correction=enable_correction, raise_err=raise_err):
             yield bytes(frame), frame_id

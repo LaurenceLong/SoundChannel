@@ -8,6 +8,7 @@ import time
 
 log = logging.getLogger(__name__)
 
+
 PLATFORM_IS_WIN = platform.system() == 'Windows'
 WIN_ERR_CODES = ['pa.paNoError', 'pa.paNotInitialized', 'pa.paUnanticipatedHostError', 'pa.paInvalidChannelCount',
                  'pa.paInvalidSampleRate', 'pa.paInvalidDevice', 'pa.paInvalidFlag', 'pa.paSampleFormatNotSupported',
@@ -19,6 +20,10 @@ WIN_ERR_CODES = ['pa.paNoError', 'pa.paNotInitialized', 'pa.paUnanticipatedHostE
                  'pa.paCanNotReadFromAnOutputOnlyStream', 'pa.paCanNotWriteToAnInputOnlyStream',
                  'pa.paIncompatibleStreamHostApi']
 WIN_ERR_CODE_MAP = {}
+
+
+class AudioError(Exception):
+    pass
 
 
 class Interface:
@@ -90,7 +95,7 @@ class Interface:
 
     def _error_check(self, res):
         if res != 0:
-            raise Exception(res, self._error_string(res))
+            raise AudioError(res, self._error_string(res))
 
     def __enter__(self):
         self.call('Initialize')
@@ -109,6 +114,7 @@ class Interface:
 
 
 class Stream:
+
     timer = time.time
 
     class Parameters(ctypes.Structure):

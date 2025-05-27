@@ -17,7 +17,7 @@ from b64_encoded_files import icon_base64
 from sound_channel import Event, EvtKeys
 
 # 版本号
-VERSION = "0.3.5"
+VERSION = "0.4.0"
 channel_base = sound_channel.SoundChannelBase()
 
 

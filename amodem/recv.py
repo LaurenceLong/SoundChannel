@@ -44,7 +44,7 @@ class Receiver:
         self.plt.plot(np.abs(S))
         self.plt.plot(equalizer.prefix)
         errors = bits != equalizer.prefix
-        if sum(errors) / len(errors) > (framing.NUM_SYMBOLS / 2) / framing.Framer.chunk_size:
+        if sum(errors) / len(errors) > (framing.RSCodecProvider.get_num_symbols() / 2) / framing.Framer.chunk_size:
             msg = f'Incorrect prefix: {sum(errors)} errors'
             raise ValueError(msg)
         log.debug('Prefix OK')
@@ -95,7 +95,7 @@ class Receiver:
             log.debug('%5.1f kHz: SNR = %5.2f dB', freq / 1e3, snr)
             self._constellation(symbols[:, i], train_symbols[:, i],
                                 f'$F_c = {freq} Hz$', index=i)
-        assert error_rate < (framing.NUM_SYMBOLS / 2) / framing.Framer.chunk_size, error_rate
+        assert error_rate < (framing.RSCodecProvider.get_num_symbols() / 2) / framing.Framer.chunk_size, error_rate
         log.debug('Training verified')
 
     def _bitstream(self, symbols, error_handler):
@@ -157,7 +157,7 @@ class Receiver:
             (1.0 - sampler.freq) * 1e6
         )
 
-    def run(self, sampler, gain, output, stop_event=None, cut_eof=False, raise_err=True, use_fid=False):
+    def run(self, sampler, gain, output, stop_event=None, enable_correction=False, raise_err=True):
         log.debug('Receiving')
         symbols = dsp.Demux(sampler, omegas=self.omegas, Nsym=self.Nsym)
         self._prefix(symbols, gain=gain)
@@ -168,14 +168,14 @@ class Receiver:
         bitstream = self._demodulate(sampler, symbols)
         bitstream = itertools.chain.from_iterable(bitstream)
 
-        if not use_fid:
-            for frame in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+        if not enable_correction:
+            for frame in framing.decode_frames(bitstream, enable_correction=enable_correction, raise_err=raise_err):
                 if stop_event is not None and stop_event.is_set():
                     raise StopIteration('Receiver stop iteration by stop_event')
                 output.write(frame)
                 self.output_size += len(frame)
         else:
-            for frame, fid in framing.decode_frames(bitstream, cut_eof=cut_eof, raise_err=raise_err, use_fid=use_fid):
+            for frame, fid in framing.decode_frames(bitstream, enable_correction=enable_correction, raise_err=raise_err):
                 if stop_event is not None and stop_event.is_set():
                     raise StopIteration('Receiver stop iteration by stop_event')
                 output.write(frame, fid)
