@@ -5,68 +5,9 @@ import logging
 import struct
 
 from . import common
+from . import rs_codec
 
 log = logging.getLogger(__name__)
-
-
-class RSCodecProvider:
-    _codec = None
-    _current_num_symbols = None
-    _expect_num_symbols = 32
-
-    @classmethod
-    def get_num_symbols(cls):
-        return cls._expect_num_symbols
-
-    @classmethod
-    def set_num_symbols(cls, num_symbols: int):
-        cls._expect_num_symbols = num_symbols
-
-    @classmethod
-    def get_codec(cls):
-        """
-        获取或创建RS编码器实例。
-        如果num_symbols与当前缓存的编码器不同，则创建一个新的编码器。
-        """
-        if cls._codec is None or cls._current_num_symbols != cls._expect_num_symbols:
-            import reedsolo
-            cls._current_num_symbols = cls._expect_num_symbols
-            cls._codec = reedsolo.RSCodec(cls._current_num_symbols)
-        return cls._codec
-
-
-def encode_with_rs(data):
-    # 确保数据是bytearray类型
-    if not isinstance(data, bytearray):
-        data = bytearray(data)
-    # 编码数据
-    encoded = RSCodecProvider.get_codec().encode(data)
-    return encoded
-
-
-def decode_with_rs(encoded_data):
-    try:
-        # 解码数据
-        decoded, _, _ = RSCodecProvider.get_codec().decode(encoded_data)
-        return decoded
-    except Exception:
-        # import traceback
-        # traceback.print_exc()
-        return encoded_data
-
-
-def encrypt_pack(data):
-    encoded = encode_with_rs(data)
-    return encoded
-
-
-def decrypt_pack(encoded_data, chunk_size):
-    chunk = bytearray(itertools.islice(encoded_data, chunk_size))
-    if len(chunk) < chunk_size:
-        raise ValueError(f'Incomplete frame, length {len(chunk)} < {chunk_size}(required)')
-
-    decoded = decode_with_rs(chunk)
-    return iter(decoded)
 
 
 def _checksum_func(x):
@@ -79,11 +20,9 @@ class Checksum:
 
     def encode(self, payload, enable_correction=False, is_last_block=False):
         checksum = _checksum_func(payload)
-        print(1111, len(payload), payload)
         if enable_correction and is_last_block:
             checksum = _checksum_func(struct.pack(self.fmt, checksum))
         encoded = struct.pack(self.fmt, checksum) + payload
-        print(2222, len(encoded), encoded)
         return encoded
 
     def decode(self, data, enable_correction=False):
@@ -98,28 +37,27 @@ class Checksum:
             valid_fail = received != expected
         if valid_fail:
             log.warning('Invalid checksum: %08x != %08x', received, expected)
-            print(2222, len(payload), payload)
             raise ValueError('Invalid checksum')
         log.debug('Good checksum: %08x', received)
         return payload, eof_detected
 
 
 class Framer:
-
     chunk_size = 255
     prefix_fmt = '>B'
     prefix_len = struct.calcsize(prefix_fmt)
     fid_fmt = '>H'
     fid_len = struct.calcsize(fid_fmt)
-    crc32_len = 4  # 4 bytes crc
+    crc_32_len = 4  # 4 bytes crc
 
-    enable_correction_chunk_size = chunk_size - RSCodecProvider.get_num_symbols()
-    enable_correction_data_size = enable_correction_chunk_size - fid_len - prefix_len - crc32_len
-    raw_data_size = chunk_size - prefix_len - crc32_len
+    enable_correction_chunk_size = chunk_size - rs_codec.RSCodecProvider.get_num_symbols()
+    enable_correction_data_size = enable_correction_chunk_size - fid_len - prefix_len - crc_32_len
+    raw_data_size = chunk_size - prefix_len - crc_32_len
 
     checksum = Checksum()
 
     EOF = b''
+    NULL = b'\x00'
 
     def __init__(self):
         self.frame_id = 0
@@ -130,24 +68,19 @@ class Framer:
         self.frame_id += 1
         if not enable_correction:
             packed = bytearray(struct.pack(self.prefix_fmt, len(frame)) + frame)
-            padded_size = self.chunk_size
+            return packed
         else:
             # add frame_id at head
             packed = bytearray(
                 struct.pack(self.fid_fmt, frame_id) + struct.pack(self.prefix_fmt, len(frame)) + frame)
             padded_size = self.enable_correction_chunk_size
 
-        current_length = len(packed)
-        if current_length > padded_size:
-            raise ValueError(f"Packed data length ({current_length}) exceeds target length ({padded_size})")
-        padding_length = padded_size - current_length
-        packed.extend(b'\x00' * padding_length)
-
-        if not enable_correction:
-            pass
-        else:
-            packed = encrypt_pack(packed)
-        return packed, frame_id
+            current_length = len(packed)
+            if current_length > padded_size:
+                raise ValueError(f"Packed data length ({current_length}) exceeds target length ({padded_size})")
+            padding_length = padded_size - current_length
+            packed.extend(b'\x00' * padding_length)
+            return packed, frame_id
 
     def encode(self, data, enable_correction=False):
         if not enable_correction:
@@ -163,7 +96,7 @@ class Framer:
             yield self._pack(block=prev_block, enable_correction=enable_correction, is_last_block=enable_correction)
 
         if not enable_correction:
-            # 添加EOF块
+            # Add EOF block
             yield self._pack(block=self.EOF)
 
     def decode(self, data, enable_correction=False, raise_err=True):
@@ -171,11 +104,11 @@ class Framer:
         while True:
             try:
                 if not enable_correction:
-                    pack = bytearray(itertools.islice(data, self.chunk_size))
+                    pack = data
                 else:
-                    pack = decrypt_pack(data, self.chunk_size)
+                    pack = rs_codec.decrypt_pack(data, self.chunk_size)
                     frame_id, = _take_fmt(pack, self.fid_fmt)
-                print(4444, len(pack), pack)
+
                 length, = _take_fmt(pack, self.prefix_fmt)
                 frame = _take_len(pack, length)
                 block, eof_detected = self.checksum.decode(frame, enable_correction=enable_correction)
@@ -188,21 +121,20 @@ class Framer:
                     yield block
                 else:
                     yield block, frame_id
+                    self.frame_id = frame_id
 
                 if eof_detected:
                     log.debug('End frame detected')
                     return
-
-                self.frame_id = frame_id
             except Exception as e:
                 if raise_err:
                     raise e
                 else:
-                    self.frame_id += 1
                     if not enable_correction:
-                        yield self.EOF
+                        yield self.NULL
                     else:
-                        yield self.EOF, self.frame_id
+                        self.frame_id += 1
+                        yield self.NULL, self.frame_id
 
 
 def _take_fmt(data, fmt):

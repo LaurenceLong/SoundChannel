@@ -591,7 +591,6 @@ class FrameWriter(FrameManager):
         self.latent_time_secs = cal_send_time(create_negot_config(None, None), 1, self.data_per_frame) + 2
         self.error_limit = math.ceil(self.frame_per_second * self.latent_time_secs)
         self.num_sequential_missing = max(2, int(round(self.num_frames_per_check / 4)))
-        self.test = set([_ for _ in range(10, 50) if _ % 8 == 0])
 
     def get_dst(self):
         return self.dst
@@ -603,9 +602,7 @@ class FrameWriter(FrameManager):
         return True
 
     def write(self, data, frame_id):
-        if data == framing.Framer.EOF or frame_id in self.test:
-            if frame_id in self.test:
-                self.test.remove(frame_id)
+        if data == framing.Framer.NULL:
             if abs(frame_id) >= self.max_frame_cnt:
                 frame_id = self.last_frame_id + 1  # frame_id correction
             if self.paused_error_frame_id is None:
@@ -660,7 +657,7 @@ class SoundChannelBase:
 
     def __init__(self, ):
         self.use_lib = LIB_SD
-        self.enable_correction = False
+        self.enable_correction = True
         self.rfbi_bits: ResendFrameBitsIterator = None
         self.filename_to_path = {}
         self.merge_files_record = {}

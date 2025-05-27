@@ -9,6 +9,7 @@ from . import dsp
 from . import common
 from . import framing
 from . import equalizer
+from . import rs_codec
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class Receiver:
         self.output_size = 0  # number of bytes written to output stream
         self.freq_err_gain = 0.01 * self.Tsym  # integration feedback gain
 
-    def _prefix(self, symbols, gain=1.0):
+    def _prefix(self, symbols, gain=1.0, enable_correction=False):
         S = common.take(symbols, len(equalizer.prefix))
         S = S[:, self.carrier_index] * gain
         sliced = np.round(np.abs(S))
@@ -44,12 +45,17 @@ class Receiver:
         self.plt.plot(np.abs(S))
         self.plt.plot(equalizer.prefix)
         errors = bits != equalizer.prefix
-        if sum(errors) / len(errors) > (framing.RSCodecProvider.get_num_symbols() / 2) / framing.Framer.chunk_size:
-            msg = f'Incorrect prefix: {sum(errors)} errors'
-            raise ValueError(msg)
+        if not enable_correction:
+            if any(errors):
+                msg = f'Incorrect prefix: {sum(errors)} errors'
+                raise ValueError(msg)
+        else:
+            if sum(errors) / len(errors) > (rs_codec.RSCodecProvider.get_num_symbols() / 2) / framing.Framer.chunk_size:
+                msg = f'Incorrect prefix: {sum(errors)} errors'
+                raise ValueError(msg)
         log.debug('Prefix OK')
 
-    def _train(self, sampler, order, lookahead):
+    def _train(self, sampler, order, lookahead, enable_correction=False):
         equalizer_length = equalizer.equalizer_length
         train_symbols = self.equalizer.train_symbols(equalizer_length)
         train_signal = (self.equalizer.modulator(train_symbols) *
@@ -74,10 +80,10 @@ class Receiver:
         # Pre-load equalization filter with the signal (+lookahead)
         equalized = list(equalization_filter(signal))
         equalized = equalized[prefix + lookahead:-postfix + lookahead]
-        self._verify_training(equalized, train_symbols)
+        self._verify_training(equalized, train_symbols, enable_correction=enable_correction)
         return equalization_filter
 
-    def _verify_training(self, equalized, train_symbols):
+    def _verify_training(self, equalized, train_symbols, enable_correction=False):
         equalizer_length = equalizer.equalizer_length
         symbols = self.equalizer.demodulator(equalized, equalizer_length)
         sliced = np.array(symbols).round()
@@ -95,7 +101,10 @@ class Receiver:
             log.debug('%5.1f kHz: SNR = %5.2f dB', freq / 1e3, snr)
             self._constellation(symbols[:, i], train_symbols[:, i],
                                 f'$F_c = {freq} Hz$', index=i)
-        assert error_rate < (framing.RSCodecProvider.get_num_symbols() / 2) / framing.Framer.chunk_size, error_rate
+        if not enable_correction:
+            assert error_rate == 0, error_rate
+        else:
+            assert error_rate < (rs_codec.RSCodecProvider.get_num_symbols() / 2) / framing.Framer.chunk_size, error_rate
         log.debug('Training verified')
 
     def _bitstream(self, symbols, error_handler):
@@ -160,9 +169,9 @@ class Receiver:
     def run(self, sampler, gain, output, stop_event=None, enable_correction=False, raise_err=True):
         log.debug('Receiving')
         symbols = dsp.Demux(sampler, omegas=self.omegas, Nsym=self.Nsym)
-        self._prefix(symbols, gain=gain)
+        self._prefix(symbols, gain=gain, enable_correction=enable_correction)
 
-        filt = self._train(sampler, order=10, lookahead=10)
+        filt = self._train(sampler, order=10, lookahead=10, enable_correction=enable_correction)
         sampler.equalizer = lambda x: list(filt(x))
 
         bitstream = self._demodulate(sampler, symbols)
