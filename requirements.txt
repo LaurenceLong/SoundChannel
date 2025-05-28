@@ -1,4 +1,6 @@
-numpy
-reedsolo
-sounddevice
-pynput
+numpy~=1.26.4
+reedsolo~=2.0.13
+sounddevice~=0.5.2
+pynput~=1.7.7
+
+PyAudio~=0.2.14
