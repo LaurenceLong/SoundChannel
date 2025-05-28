@@ -162,9 +162,9 @@ class Stream:
             api_name = f'GetDefault{direction}Device'
             index = interface.call(api_name, restype=ctypes.c_int)
             self.params = Stream.Parameters(
-                device=index,  # choose default device
-                channelCount=1,  # mono audio
-                sampleFormat=0x00000008,  # 16-bit samples (paInt16)
+                device=index,               # choose default device
+                channelCount=1,             # mono audio
+                sampleFormat=0x00000008,    # 16-bit samples (paInt16)
                 suggestedLatency=self.latency,
                 hostApiSpecificStreamInfo=None)
 

@@ -187,7 +187,7 @@ class Receiver:
             for frame, fid in framing.decode_frames(bitstream, enable_correction=enable_correction, raise_err=raise_err):
                 if stop_event is not None and stop_event.is_set():
                     raise StopIteration('Receiver stop iteration by stop_event')
-                output.write(frame, fid)
+                output.write(frame, fid)  # should implement a writer support write (data, frame_id)
                 self.output_size += len(frame)
 
     def report(self):
@@ -216,7 +216,7 @@ class Receiver:
             width = np.ceil(Nfreq / float(height))
             self.plt.subplot(height, width, index + 1)
 
-        theta = np.linspace(0, 2 * np.pi, 1000)
+        theta = np.linspace(0, 2*np.pi, 1000)
         y = np.array(y)
         self.plt.plot(y.real, y.imag, '.')
         self.plt.plot(np.cos(theta), np.sin(theta), ':')
@@ -224,5 +224,5 @@ class Receiver:
         self.plt.plot(points.real, points.imag, '+')
         self.plt.grid('on')
         self.plt.axis('equal')
-        self.plt.axis(np.array([-1, 1, -1, 1]) * 1.1)
+        self.plt.axis(np.array([-1, 1, -1, 1])*1.1)
         self.plt.title(title)

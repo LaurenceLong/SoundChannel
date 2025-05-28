@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # PYTHON_ARGCOMPLETE_OK
 import argparse
+import contextlib
 import logging
 import os
 import sys
@@ -132,7 +133,8 @@ def create_parser(description, interface_factory):
         ),
         calib=lambda config, args: calib.send(
             config=config, dst=args.dst,
-            volume_cmd=get_volume_cmd(args)
+            volume_cmd=get_volume_cmd(args),
+            gain=args.gain,
         ),
         input_type=FileType('rb'),
         output_type=FileType('wb', interface_factory),
@@ -172,8 +174,9 @@ def create_parser(description, interface_factory):
     for sub in subparsers.choices.values():
         sub.add_argument('-c', '--calibrate', nargs='?', default=False,
                          metavar='SYSTEM', help=calibration_help)
-        sub.add_argument('-l', '--audio-library', default='libportaudio.so',
-                         help='File name of PortAudio shared library.')
+        sub.add_argument('-l', '--audio-library', default='sd',
+                         help="'alsa', 'sd' or file name of "
+                         "PortAudio shared library")
         sub.add_argument('-z', '--zlib', default=False, action='store_true',
                          help='Use zlib to compress/decompress data.')
         g = sub.add_mutually_exclusive_group()
@@ -186,14 +189,6 @@ def create_parser(description, interface_factory):
     return p
 
 
-class _Dummy:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
-
-
 def _version():
     try:
         return version("amodem")
@@ -202,6 +197,8 @@ def _version():
 
 
 def _config_log(args):
+    level = fmt = None
+
     if args.verbose == 0:
         level, fmt = 'INFO', '%(message)s'
     elif args.verbose == 1:
@@ -251,11 +248,11 @@ def _main():
         from . import sd  # pylint: disable=import-outside-toplevel
         interface = sd.Interface(config)
     elif args.audio_library == '-':
-        interface = _Dummy()  # manually disable PortAudio
+        interface = contextlib.nullcontext()  # manually disable PortAudio
     elif args.command == 'send' and args.output is not None:
-        interface = _Dummy()  # redirected output
+        interface = contextlib.nullcontext()  # redirected output
     elif args.command == 'recv' and args.input is not None:
-        interface = _Dummy()  # redirected input
+        interface = contextlib.nullcontext()  # redirected input
     else:
         interface = audio.Interface(config)
         interface.load(args.audio_library)
