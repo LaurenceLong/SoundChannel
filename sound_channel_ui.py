@@ -264,7 +264,7 @@ class AudioSetDialog(tk.Toplevel):
         self.devices_released = False
         super().__init__()
 
-        self.title("音频设备选择")
+        self.title("Audio Device Selection")
         self.geometry("400x400")
 
         self.selected_input = tk.StringVar()
@@ -289,10 +289,10 @@ class AudioSetDialog(tk.Toplevel):
         main_canvas.configure(yscrollcommand=scrollbar.set)
 
         # 创建两个LabelFrame分别用于输入和输出设备
-        self.input_frame = ttk.LabelFrame(content_frame, text="输入设备（麦克风）", padding=10)
+        self.input_frame = ttk.LabelFrame(content_frame, text="Input Device (Microphone)", padding=10)
         self.input_frame.pack(fill="x", padx=10, pady=5)
 
-        self.output_frame = ttk.LabelFrame(content_frame, text="输出设备（扬声器）", padding=10)
+        self.output_frame = ttk.LabelFrame(content_frame, text="Output Device (Speaker)", padding=10)
         self.output_frame.pack(fill="x", padx=10, pady=5)
 
         self.refresh_dialog()
@@ -309,19 +309,19 @@ class AudioSetDialog(tk.Toplevel):
 
         ttk.Button(
             button_frame,
-            text="确认",
+            text="Confirm",
             command=self.on_dialog_confirm
         ).pack(side="right", padx=5)
 
         ttk.Button(
             button_frame,
-            text="取消",
+            text="Cancel",
             command=self.destroy
         ).pack(side="right", padx=5)
 
         ttk.Button(
             button_frame,
-            text="刷新",
+            text="Refresh",
             command=self.on_dialog_refresh
         ).pack(side="left", padx=5)
 
