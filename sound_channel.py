@@ -1150,6 +1150,12 @@ class SoundChannelBase:
                     for idx in needed_indexes:
                         part_name = part_name_list[idx]
                         self.merge_files_record[filename][part_name] = False
+                else:
+                    multipart_file_path = os.path.join(RECEIVE_FOLDER, filename)
+                    file_size = os.path.getsize(multipart_file_path)
+                    self.notify_event_queue.put(Event(EvtKeys.NOTIFY_FILE, None))
+                    self.recv_event_queue.put(Event(EvtKeys.RECV_FILE_START, filename, file_size, 0.1))
+                    self.recv_event_queue.put(Event(EvtKeys.RECV_FILE_FINISH, multipart_file_path))
                 self.negot_recv_multipart_file(filename, needed_indexes)
             except:
                 traceback.print_exc()
@@ -1238,6 +1244,7 @@ class SoundChannelBase:
                                                            stop_event=stop_event)
                     if recv_ok:
                         origin_filename = filename.split(MULTI_FILE_SEP)[0]
+                        multipart_file_path = None
                         if origin_filename in self.merge_files_record:
                             tails_status = self.merge_files_record[origin_filename]
                             tails_status[filename] = True
@@ -1246,8 +1253,14 @@ class SoundChannelBase:
                                      f"progress: {sum(tails_status_values)}/{len(tails_status_values)}")
                             if all(tails_status_values):
                                 f_path_list = [os.path.join(RECEIVE_FOLDER, _) for _ in tails_status.keys()]
-                                merge_files(f_path_list, os.path.join(RECEIVE_FOLDER, origin_filename))
+                                multipart_file_path = os.path.join(RECEIVE_FOLDER, origin_filename)
+                                merge_files(f_path_list, multipart_file_path)
                         listen_event_queue.put(Event(EvtKeys.RECV_FILE_FINISH, f_path))
+                        if multipart_file_path:
+                            file_size = os.path.getsize(multipart_file_path)
+                            self.notify_event_queue.put(Event(EvtKeys.NOTIFY_FILE, None))
+                            listen_event_queue.put(Event(EvtKeys.RECV_FILE_START, origin_filename, file_size, 0.1))
+                            listen_event_queue.put(Event(EvtKeys.RECV_FILE_FINISH, multipart_file_path))
                     else:
                         listen_event_queue.put(Event(EvtKeys.FILE_FAIL, f_path))
                         if stream is self.r_stream and not stop_event.is_set():
